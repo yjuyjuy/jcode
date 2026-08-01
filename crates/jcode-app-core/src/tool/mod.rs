@@ -5,6 +5,7 @@ mod bash;
 mod batch;
 mod bg;
 mod browser;
+mod compact;
 mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
@@ -88,6 +89,37 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(session_id)
         .cloned()
+}
+
+/// Sessions that have a pending agent-requested manual compaction.
+///
+/// The `compact_context` tool cannot compact synchronously: `force_compact_with`
+/// needs the caller's live session messages and forked provider, both owned by
+/// the `Agent`, which is exclusively locked across its own turn while the tool
+/// runs. So the tool records a request here keyed by its own `ctx.session_id`,
+/// and the agent turn loop drains it at the next safe point (where it holds
+/// `&mut Agent`) and runs the same `request_manual_compaction` path that the
+/// `/compact` command uses. This mirrors the process-global, session-keyed
+/// pattern already used for `SESSION_TOOL_POLICIES`, so no `ToolContext` field
+/// (and its 60+ construction sites) has to change.
+static PENDING_COMPACTION_REQUESTS: LazyLock<StdRwLock<HashSet<String>>> =
+    LazyLock::new(|| StdRwLock::new(HashSet::new()));
+
+/// Record that the given session asked to compact its own context.
+pub(crate) fn request_session_compaction(session_id: &str) {
+    PENDING_COMPACTION_REQUESTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(session_id.to_string());
+}
+
+/// Take (clear and report) a pending compaction request for the given session.
+/// Returns true when a request was pending and is now consumed.
+pub(crate) fn take_session_compaction_request(session_id: &str) -> bool {
+    PENDING_COMPACTION_REQUESTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(session_id)
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
@@ -255,7 +287,7 @@ impl Registry {
         tools
     }
 
-    pub async fn new(_provider: Arc<dyn Provider>) -> Self {
+    pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let start = std::time::Instant::now();
         let skills_start = std::time::Instant::now();
         let skills = Self::shared_skills_registry();
@@ -285,7 +317,14 @@ impl Registry {
         Self::insert_tool(
             &mut tools_map,
             "conversation_search",
-            conversation_search::ConversationSearchTool::new(compaction),
+            conversation_search::ConversationSearchTool::new(compaction.clone()),
+        );
+        // Agent-callable manual compaction of the caller's own session. Ungated
+        // (ordinary self-management) and available by default.
+        Self::insert_tool(
+            &mut tools_map,
+            "compact_context",
+            compact::CompactContextTool::new(compaction, provider),
         );
         // Sponsored discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
