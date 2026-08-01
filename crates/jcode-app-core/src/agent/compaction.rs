@@ -87,6 +87,37 @@ impl Agent {
         }
     }
 
+    /// Drain any pending `compact_context` tool request for this session and, if
+    /// present, start manual compaction. Called by the turn loop at a safe point
+    /// where it holds `&mut self`, since the tool cannot borrow the locked Agent
+    /// while it runs. The background summary is applied at the turn boundary via
+    /// the existing `CompactionFinished` path, exactly like the `/compact`
+    /// command.
+    pub(super) fn drain_pending_compaction_request(&mut self) {
+        if !crate::tool::take_session_compaction_request(&self.session.id) {
+            return;
+        }
+        let session_id = self.session.id.clone();
+        let (message, success) = self.request_manual_compaction();
+        if success {
+            crate::logging::info(&format!(
+                "Agent-requested manual compaction started for session {session_id}"
+            ));
+            crate::runtime_memory_log::emit_event(
+                crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                    "manual_compaction_requested",
+                    "agent_tool_compaction_started",
+                )
+                .with_session_id(session_id)
+                .force_attribution(),
+            );
+        } else {
+            crate::logging::info(&format!(
+                "Agent-requested manual compaction not started for session {session_id}: {message}"
+            ));
+        }
+    }
+
     fn is_context_limit_error(error: &str) -> bool {
         let lower = error.to_lowercase();
         lower.contains("context length")

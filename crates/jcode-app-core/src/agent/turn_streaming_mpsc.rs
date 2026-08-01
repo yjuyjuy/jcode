@@ -1573,6 +1573,12 @@ impl Agent {
                 self.session.save()?;
             }
 
+            // Honor any agent-requested manual compaction (compact_context tool)
+            // now that all tool results are in and the conversation is valid. The
+            // background summary is applied at the turn boundary via the existing
+            // CompactionFinished path.
+            self.drain_pending_compaction_request();
+
             if !generated_image_contexts.is_empty() {
                 for blocks in generated_image_contexts.drain(..) {
                     self.add_message(Role::User, blocks);
