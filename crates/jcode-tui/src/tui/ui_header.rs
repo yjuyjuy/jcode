@@ -513,11 +513,15 @@ fn active_account_suffix(provider_name: &str) -> Option<String> {
     let (label, count) = match provider {
         ActiveProvider::Claude => (
             crate::auth::claude::active_account_label(),
-            crate::auth::claude::list_accounts().map(|a| a.len()).unwrap_or(0),
+            crate::auth::claude::list_accounts()
+                .map(|a| a.len())
+                .unwrap_or(0),
         ),
         ActiveProvider::OpenAI => (
             crate::auth::codex::active_account_label(),
-            crate::auth::codex::list_accounts().map(|a| a.len()).unwrap_or(0),
+            crate::auth::codex::list_accounts()
+                .map(|a| a.len())
+                .unwrap_or(0),
         ),
         _ => return None,
     };
@@ -823,9 +827,7 @@ fn build_persistent_header_with_auth(
             model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
         }
     }
-    if !model_is_placeholder
-        && let Some(account) = active_account_suffix(&app.provider_name())
-    {
+    if !model_is_placeholder && let Some(account) = active_account_suffix(&app.provider_name()) {
         let suffix = format!(" · {}", account);
         if model_line_len + suffix.chars().count() <= fit_width {
             model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));

@@ -5,8 +5,8 @@ mod bash;
 mod batch;
 mod bg;
 mod browser;
-mod compact;
 mod communicate;
+mod compact;
 #[cfg(target_os = "macos")]
 mod computer;
 mod conversation_search;
