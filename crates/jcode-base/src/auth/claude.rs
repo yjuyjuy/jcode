@@ -523,15 +523,6 @@ pub fn get_subscription_type() -> Option<String> {
     load_credentials().ok().and_then(|c| c.subscription_type)
 }
 
-/// Check if the subscription is Claude Max (allows Opus models).
-/// Returns true if subscription type is "max" or unknown (benefit of the doubt).
-pub fn is_max_subscription() -> bool {
-    match get_subscription_type() {
-        Some(t) => t != "pro",
-        None => true,
-    }
-}
-
 /// Load credentials for the active Anthropic account.
 /// Falls through Claude Code -> jcode accounts -> OpenCode, preferring non-expired tokens.
 pub fn load_credentials() -> Result<ClaudeCredentials> {
