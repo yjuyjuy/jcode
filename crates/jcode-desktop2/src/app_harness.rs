@@ -44,6 +44,7 @@ impl App {
                     session_id,
                     working_dir,
                 } => {
+                    let reconnected = self.model.failure.is_some();
                     self.model.status = format!("attached: {session_id}");
                     // A successful attach is the proof the failure is over: a
                     // reconnected window must not keep reporting the outage it
@@ -54,10 +55,19 @@ impl App {
                     self.model.strip.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
                     self.model.working_dir = working_dir;
+                    if reconnected {
+                        self.model.set_notice("reconnected");
+                    }
                     self.retitle();
                 }
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
+                }
+                harness::HarnessUpdate::Models { models, current } => {
+                    self.model.model_picker.set_models(models, current);
+                }
+                harness::HarnessUpdate::ModelSelected(model) => {
+                    self.model.model_picker.mark_selected(model);
                 }
                 harness::HarnessUpdate::Text(text) => {
                     self.model.transcript.append_assistant(&text);
@@ -106,6 +116,10 @@ impl App {
                         self.model.transcript.streaming_len(),
                         std::time::Instant::now(),
                     );
+                }
+                harness::HarnessUpdate::Todo(card) => {
+                    self.model.transcript.set_todo(&card);
+                    self.model.stream.reveal_all();
                 }
                 harness::HarnessUpdate::MessageAccepted => {
                     // The agent has the oldest message still in flight. Marking
@@ -189,21 +203,19 @@ impl App {
         if turn_ended && !self.model.busy {
             self.flush_queued_message();
         }
+        // The horizontal workspace keeps neighboring pages visible even when
+        // the overview is closed. Fetch their tails as soon as the session list
+        // is known; `Peeks` deduplicates this call across ordinary redraws.
+        self.request_peek();
     }
 
-    /// Switch to whichever session the strip now points at.
+    /// Drop everything that belonged to the session being left.
     ///
-    /// The transcript belongs to the session, so it is cleared rather than
-    /// carried across: appending another conversation's output to the one on
-    /// screen would be actively misleading. Reloading real history needs
-    /// `GetHistory`; until that is wired, an empty page is the honest state.
-    pub(crate) fn attach_focused_session(&mut self) {
-        let Some(target) = self.model.strip.focused_session().map(str::to_string) else {
-            return;
-        };
-        if self.model.session_id.as_deref() == Some(target.as_str()) {
-            return;
-        }
+    /// Shared by attaching to an existing session and by creating a new one:
+    /// both put a different conversation on screen, and a transcript, a
+    /// reveal, or a progress clock carried across from the old one would be
+    /// output attributed to the wrong session.
+    pub(crate) fn clear_for_session_change(&mut self) {
         // Switching sessions changes the conversation, not the user's view
         // preferences: the thinking-display mode is carried across so a new
         // session does not silently revert to the structural default.
@@ -221,6 +233,54 @@ impl App {
         // Attaching is a jump, not a scroll: easing here would sweep through
         // the previous session's layout.
         self.model.smooth.settle();
+        // A catalog and its open menu belong to the session that produced it.
+        self.model.model_picker = crate::model_picker::Picker::default();
+    }
+
+    /// Start a fresh session and attach to it.
+    ///
+    /// The id is the daemon's to assign, so the app clears the page now and
+    /// adopts whatever comes back on the `Attached` event. Until then the
+    /// session id is `None`, which is the same state the app boots in, so
+    /// every consumer already handles it.
+    pub(crate) fn new_session(&mut self) {
+        let Some((_, outgoing)) = self.harness.as_ref() else {
+            self.model.notice = Some("not connected: cannot start a session".into());
+            return;
+        };
+        if outgoing.send(harness::Command::New).is_err() {
+            self.model.notice = Some("not connected: cannot start a session".into());
+            return;
+        }
+        self.clear_for_session_change();
+        self.model.session_id = None;
+        self.model.working_dir = None;
+        self.model.status = "starting a new session...".into();
+        self.retitle();
+    }
+
+    /// Switch to whichever session the strip now points at.
+    ///
+    /// The transcript belongs to the session, so it is cleared rather than
+    /// carried across: appending another conversation's output to the one on
+    /// screen would be actively misleading. Reloading real history needs
+    /// `GetHistory`; until that is wired, an empty page is the honest state.
+    pub(crate) fn attach_focused_session(&mut self) {
+        let Some(target) = self.model.strip.focused_session().map(str::to_string) else {
+            return;
+        };
+        if self.model.session_id.as_deref() == Some(target.as_str()) {
+            return;
+        }
+        // Once this model becomes a neighbor it must show the conversation the
+        // user just left, not an older daemon peek. The live transcript is the
+        // freshest cache entry and remains read-only while the target attaches.
+        if let Some(current) = self.model.session_id.clone() {
+            self.model
+                .peeks
+                .insert(&current, self.model.transcript.clone());
+        }
+        self.clear_for_session_change();
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
         // The new session's directory arrives with its `Attached` event; until

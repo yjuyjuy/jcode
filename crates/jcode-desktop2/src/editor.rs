@@ -239,6 +239,12 @@ impl Editor {
 
     /// Ctrl+W / Alt+Backspace: delete the word before the cursor.
     pub fn delete_word_back(&mut self) {
+        // Replace an active selection, like delete_back does. Otherwise the
+        // drain below leaves `anchor` past the new end and the next Backspace
+        // slices out of bounds (#728).
+        if self.delete_selection().is_some() {
+            return;
+        }
         let start = self.word_back();
         if start == self.cursor {
             return;
@@ -250,6 +256,9 @@ impl Editor {
 
     /// Alt+D: delete the word after the cursor.
     pub fn delete_word_forward(&mut self) {
+        if self.delete_selection().is_some() {
+            return;
+        }
         let end = self.word_forward();
         if end == self.cursor {
             return;

@@ -509,6 +509,54 @@ fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
 }
 
 #[test]
+fn test_new_local_session_does_not_run_post_login_model_refresh() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+
+    let authed = StdArc::new(AtomicBool::new(false));
+    let refreshes = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(AuthUxStateSpaceProvider {
+        authed: StdArc::clone(&authed),
+        refreshes: StdArc::clone(&refreshes),
+        model: StdArc::new(StdMutex::new("existing-model".to_string())),
+        set_model_requests: StdArc::new(StdMutex::new(Vec::new())),
+        provider_id: "state-space",
+        provider_label: "StateSpace",
+        models: &["state-space-alpha", "state-space-beta"],
+        include_wrong_profile_first: false,
+        include_generic_profile_duplicate: false,
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let _guard = rt.enter();
+    let app = App::new_for_test_harness(provider, registry);
+
+    // Give any accidentally spawned startup work a chance to execute.
+    std::thread::sleep(Duration::from_millis(50));
+
+    assert!(
+        !authed.load(Ordering::SeqCst),
+        "startup called on_auth_changed"
+    );
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        0,
+        "startup refreshed a provider catalog"
+    );
+    assert!(!app.auth_catalog_refresh_pending);
+    assert!(
+        !app.onboarding_auto_model_selection_active
+            .load(Ordering::SeqCst)
+    );
+    assert!(
+        app.onboarding_auto_model_selection_baseline
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
@@ -1704,8 +1752,7 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
         App::apply_inline_interactive_filter(picker);
         let _render_lock = scroll_render_test_lock();
         let backend = ratatui::backend::TestBackend::new(90, 14);
-        let mut terminal =
-            ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
         render_and_snap(app, &mut terminal)
     };
     let claude_text = render_filtered(&mut app, "claude-sonnet-4-6");
@@ -1770,8 +1817,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         App::apply_inline_interactive_filter(picker);
         let _render_lock = scroll_render_test_lock();
         let backend = ratatui::backend::TestBackend::new(180, 48);
-        let mut terminal =
-            ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
         render_and_snap(app, &mut terminal)
     };
 
@@ -1825,8 +1871,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         copilot_text
     );
     assert!(
-        deepseek_text.contains("deepseek/deepseek-v4-pro")
-            && deepseek_text.contains("openrouter"),
+        deepseek_text.contains("deepseek/deepseek-v4-pro") && deepseek_text.contains("openrouter"),
         "OpenRouter route should be visible, got:\n{}",
         deepseek_text
     );
@@ -2154,7 +2199,8 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_turn);
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("1 incomplete todo. We poked the agent")
+            msg.content
+                .contains("1 incomplete todo. We poked the agent")
                 && msg.content.contains("/poke off")
         }));
     });
@@ -2410,8 +2456,10 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(70),
-                    completion_confidence: Some(80),
+                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
+                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(
+                        80,
+                    )),
                     confidence_history: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -2422,13 +2470,26 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     priority: "medium".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(90),
-                    completion_confidence: Some(95),
+                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
+                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(
+                        95,
+                    )),
                     confidence_history: Vec::new(),
                 },
             ],
         )
         .expect("save todos");
+
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save goal delivery state");
 
         app.auto_poke_incomplete_todos = true;
         app.is_processing = true;
@@ -2472,10 +2533,18 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         // todo tool, the next completion check passes and disarms auto-poke.
         let mut validated = crate::todo::load_todos(&app.session.id).expect("load todos");
         for todo in &mut validated {
-            todo.completion_confidence = Some(100);
+            todo.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(100));
             todo.confidence_history = match todo.id.as_str() {
-                "todo-1" => vec![70, 80, 90, 100],
-                _ => vec![90, 100],
+                "todo-1" => vec![
+                    crate::todo::ConfidenceState::Speculative,
+                    crate::todo::ConfidenceState::Plausible,
+                    crate::todo::ConfidenceState::Validated,
+                    crate::todo::ConfidenceState::Verified,
+                ],
+                _ => vec![
+                    crate::todo::ConfidenceState::Validated,
+                    crate::todo::ConfidenceState::Verified,
+                ],
             };
         }
         crate::todo::save_todos(&app.session.id, &validated).expect("save validated todos");
@@ -2483,13 +2552,15 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         app.pending_queued_dispatch = false;
         app.is_processing = true;
         super::local::finish_turn(&mut app);
-        assert!(!app.auto_poke_incomplete_todos);
+        // Auto-poke is default-on, so a completed cycle re-arms for the next
+        // batch of work rather than silently switching the feature off.
+        assert_eq!(app.auto_poke_incomplete_todos, app.auto_poke_default_on);
         assert!(!app.pending_queued_dispatch);
         assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("All todos done. Completion confidence: 100%.")
+                .contains("All todos done. Completion confidence: verified.")
         }));
     });
 }
@@ -2499,9 +2570,12 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
     let summary = super::commands::todo_confidence_summary(&[crate::todo::TodoItem {
         status: "completed".to_string(),
         priority: "high".to_string(),
-        confidence: Some(0),
-        completion_confidence: Some(100),
-        confidence_history: vec![0, 100],
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
+        completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        confidence_history: vec![
+            crate::todo::ConfidenceState::from_legacy_score(0),
+            crate::todo::ConfidenceState::from_legacy_score(100),
+        ],
         ..Default::default()
     }]);
 
@@ -2516,9 +2590,14 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
     let summary = super::commands::todo_confidence_summary(&[crate::todo::TodoItem {
         status: "completed".to_string(),
         priority: "high".to_string(),
-        confidence: Some(100),
-        completion_confidence: Some(100),
-        confidence_history: vec![70, 80, 90, 100],
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        confidence_history: vec![
+            crate::todo::ConfidenceState::Speculative,
+            crate::todo::ConfidenceState::Plausible,
+            crate::todo::ConfidenceState::Validated,
+            crate::todo::ConfidenceState::Verified,
+        ],
         ..Default::default()
     }]);
 
@@ -2539,13 +2618,27 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 content: "Validate provider result".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(100),
-                completion_confidence: Some(100),
-                confidence_history: vec![70, 100],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::from_legacy_score(70),
+                    crate::todo::ConfidenceState::from_legacy_score(100),
+                ],
                 ..Default::default()
             }],
         )
         .expect("save todos");
+
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
 
         app.auto_poke_incomplete_todos = true;
         app.is_processing = true;
@@ -2568,6 +2661,9 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
+        // Pin the default so the clean second cycle disarms; this test is
+        // about challenging the spike exactly once.
+        app.auto_poke_default_on = false;
         super::local::finish_turn(&mut app);
 
         assert!(!app.auto_poke_incomplete_todos);
@@ -2604,8 +2700,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(90),
-                completion_confidence: Some(90),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 confidence_history: Vec::new(),
             }],
         )

@@ -1834,7 +1834,7 @@ fn handle_disconnected_key_internal(
                 return Ok(());
             }
             KeyCode::Char('l') if !app.diff_pane_visible() => {
-                app.clear_view_keep_context();
+                app.clear_view_terminal_style();
                 return Ok(());
             }
             _ => {
@@ -1880,6 +1880,12 @@ fn handle_disconnected_key_internal(
             }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
+                return Ok(());
+            }
+            // Cmd+L mirrors Ctrl+L: terminal-style clear (blank spacer
+            // pushes the transcript up into scrollback).
+            KeyCode::Char('l') => {
+                app.clear_view_terminal_style();
                 return Ok(());
             }
             _ => {}

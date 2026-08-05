@@ -3,22 +3,74 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
+/// it is intentionally private so the model reassesses from evidence rather
+/// than targeting a timer or evaluator boundary.
+pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop quality, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
+
+/// Private policy. Do not include this duration in model-facing schemas or
+/// continuation text.
+const TODO_LONG_SESSION_REVIEW_AFTER: chrono::Duration = chrono::Duration::minutes(30);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TodoReviewState {
+    cycle_started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    review_delivered: bool,
+}
+
 pub use jcode_task_types::{
-    TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopState, IntentUnderstanding,
+    IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
+    TodoPlanField,
 };
 
-/// Minimum passing score for 0-100 quality assessments. Scores below this do
-/// not provide enough evidence to clear their respective quality gate.
-pub const QUALITY_GATE_THRESHOLD: u8 = 96;
+/// Whether the plan's intent understanding is solid enough to work against.
+pub fn intent_understanding_passes(state: Option<IntentUnderstanding>) -> bool {
+    state.is_some_and(|state| state >= IntentUnderstanding::Clear)
+}
 
-/// Goals whose closed-feedback-loop score is strictly below this are considered
-/// open-loop: no observation reports back whether the work satisfies the
-/// requirements, so there is nothing credible to iterate against.
-pub const LOW_CLOSED_FEEDBACK_LOOP: u8 = QUALITY_GATE_THRESHOLD;
+/// Whether a goal's feedback loop reports back on the requirements by itself.
+pub fn feedback_loop_passes(state: Option<FeedbackLoopState>) -> bool {
+    state.is_some_and(|state| state >= FeedbackLoopState::Closed)
+}
 
-/// Below this score the agent does not yet understand the user's intent well
-/// enough to work confidently against it.
-pub const LOW_INTENT_UNDERSTANDING: u8 = QUALITY_GATE_THRESHOLD;
+/// Whether a completed todo carries enough evidence behind its completion.
+pub fn completion_confidence_passes(state: Option<ConfidenceState>) -> bool {
+    state.is_some_and(|state| state >= ConfidenceState::Validated)
+}
+
+/// The minimum delivery state for a completed goal. Outcome delivery is only
+/// appropriate when the request itself includes operational delivery, so it
+/// must not be inferred from difficulty.
+pub fn required_delivery_state(_difficulty: Option<Difficulty>) -> DeliveryState {
+    DeliveryState::WorkflowValidated
+}
+
+/// Whether a goal's recorded delivery clears its difficulty-calibrated bar.
+pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
+    let delivery_passes = goal
+        .delivery_state
+        .is_some_and(|state| state >= required_delivery_state(goal.difficulty));
+    let autonomy_passes = goal
+        .autonomy
+        .is_some_and(|state| state >= Autonomy::NecessaryFollowthrough);
+    let iteration_passes = goal
+        .iteration_maturity
+        .is_some_and(IterationMaturity::permits_completion);
+    let stopping_evidence_passes = !matches!(
+        goal.iteration_maturity,
+        Some(
+            IterationMaturity::PlateauConfirmed
+                | IterationMaturity::ConstraintsExhausted
+                | IterationMaturity::BudgetExhausted
+        )
+    ) || goal
+        .stopping_evidence
+        .as_deref()
+        .is_some_and(|evidence| !evidence.trim().is_empty());
+    delivery_passes && autonomy_passes && iteration_passes && stopping_evidence_passes
+}
 
 /// Pre-plan-intent-rewrite alignment continuation. Kept only so persisted
 /// transcripts still classify it as a synthetic gate message, not a user turn.
@@ -39,7 +91,11 @@ const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-clim
 
 /// Model-facing continuation for the private end-to-end ownership check. Names
 /// the assessment category without disclosing the score or threshold.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "Your end-to-end ownership is not high enough to complete this goal. Take ownership of the full user outcome, not just the immediate implementation. Follow the work through every relevant integration and runtime path, resolve consequential gaps, validate the complete workflow, and finish the necessary follow-through. Then call the todo tool again, setting a higher `end_to_end_ownership` on the goal for this group; until that field is raised the write is rejected and the stored todo list is left unchanged.";
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state, autonomy, iteration maturity, or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, validate the complete workflow and consequential adjacent necessary follow-through, and continue exercising the feedback loop while gains or material hypotheses remain. Reassess the goal honestly from concrete evidence, then call the todo tool again with an updated `delivery_state`, `autonomy`, and `iteration_maturity`, plus any required `stopping_evidence`.";
+
+/// Legacy ownership-gate wording (pre delivery_state rename). Kept only so
+/// persisted transcripts still classify it as a synthetic gate message.
+const LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your end-to-end ownership is not high enough to finish this goal.";
 
 /// Model-facing continuation for private completion-confidence checks. Names
 /// the assessment category without disclosing scores, items, or thresholds.
@@ -51,14 +107,15 @@ pub const TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "[automated todo completi
 pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your completion confidence rose too sharply to count as independently validated. Do not reply conversationally or wait for the user. Instead: recheck the completed result using concrete evidence, address any issues you find, then call the todo tool again with completion_confidence values that reflect the validation you performed.";
 
 /// A completed todo is considered spike-finished when its final recorded
-/// confidence increase is at least this large.
-pub const TODO_CONFIDENCE_SPIKE: u8 = 15;
+/// confidence step jumps this many levels or more (e.g. speculative straight
+/// to validated) instead of climbing through evidence-backed states.
+pub const TODO_CONFIDENCE_SPIKE_LEVELS: u8 = 2;
 
-/// Below this score on the very first plan write, the agent is admitting it
-/// does not yet know what it is being asked to do. That is worth one immediate
-/// nudge, because a whole turn spent on the wrong task cannot be recovered at
-/// turn end. Every other write-time check is deferred to the turn-end digest.
-pub const SEVERE_INTENT_MISUNDERSTANDING: u8 = 60;
+/// A first plan write that admits to not knowing what it is being asked to do
+/// gets one immediate nudge, because a whole turn spent on the wrong task
+/// cannot be recovered at turn end. Every other write-time check is deferred
+/// to the turn-end digest.
+pub const SEVERE_INTENT_MISUNDERSTANDING: IntentUnderstanding = IntentUnderstanding::Uncertain;
 
 /// Which deferred quality check a recorded observation came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,8 +140,11 @@ pub struct GateObservation {
     /// Todo group for goal-scoped observations; `None` for plan-level ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// The score observed when this point was flagged.
-    pub score: Option<u8>,
+    /// The semantic state observed when this point was flagged, as its string
+    /// form. Legacy logs stored a numeric `score`; those entries load with
+    /// `state: None`, which the digest already treats as an unresolved point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Header for the turn-end digest of unresolved quality-check points.
@@ -94,7 +154,7 @@ pub struct GateObservation {
 /// replanning. Names categories without disclosing scores or thresholds.
 pub const TODO_GATE_DIGEST_PREFIX: &str = "[automated todo quality review - not a user message] Before you treat this turn as finished, double-check the weak points it surfaced. Do not reply conversationally or wait for the user.";
 
-/// Whether the score behind this observation has since reached its threshold.
+/// Whether the state behind this observation has since reached its bar.
 ///
 /// This no longer suppresses the observation: a loop that closed only after
 /// work was already underway did not govern the work done before it. It selects
@@ -106,14 +166,15 @@ fn observation_score_later_cleared(
     goals: &[TodoGoal],
 ) -> bool {
     match observation.kind {
-        GateObservationKind::IntentUnderstanding => plan
-            .understands_user_intent
-            .is_some_and(|score| score >= LOW_INTENT_UNDERSTANDING),
-        GateObservationKind::ClosedFeedbackLoop => goals
-            .iter()
-            .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
-            .and_then(|goal| goal.closed_feedback_loop)
-            .is_some_and(|score| score >= LOW_CLOSED_FEEDBACK_LOOP),
+        GateObservationKind::IntentUnderstanding => {
+            intent_understanding_passes(plan.understands_user_intent)
+        }
+        GateObservationKind::ClosedFeedbackLoop => feedback_loop_passes(
+            goals
+                .iter()
+                .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
+                .and_then(|goal| goal.closed_feedback_loop),
+        ),
     }
 }
 
@@ -218,10 +279,10 @@ fn group_is_complete(todos: &[TodoItem], group: &Option<String>) -> bool {
     matching.peek().is_some() && matching.all(|todo| todo.status == "completed")
 }
 
-/// Whether every group newly closed by this update has a sufficient assessment
-/// of ownership over its full outcome. Groups completed before this check was
+/// Whether every group newly closed by this update has a sufficient recorded
+/// delivery state for its difficulty. Groups completed before this check was
 /// introduced are intentionally grandfathered so existing sessions stay writable.
-pub fn newly_completed_groups_have_sufficient_ownership(
+pub fn newly_completed_groups_have_sufficient_delivery(
     previous: &[TodoItem],
     incoming: &[TodoItem],
     goals: &[TodoGoal],
@@ -241,8 +302,31 @@ pub fn newly_completed_groups_have_sufficient_ownership(
         goals
             .iter()
             .find(|goal| normalized_group(goal.group.as_deref()) == group)
-            .and_then(|goal| goal.end_to_end_ownership)
-            .is_some_and(|score| score >= QUALITY_GATE_THRESHOLD)
+            .is_some_and(delivery_state_passes)
+    })
+}
+
+/// Whether every completed todo group currently has a passing delivery
+/// assessment. This is evaluated at turn finish, after the todo update has
+/// already been persisted, so a weak assessment can block completion without
+/// discarding the model's state transition.
+pub fn completed_groups_have_sufficient_delivery(todos: &[TodoItem], goals: &[TodoGoal]) -> bool {
+    let mut groups: Vec<Option<String>> = Vec::new();
+    for todo in todos {
+        let group = normalized_group(todo.group.as_deref());
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+
+    groups.into_iter().all(|group| {
+        if !group_is_complete(todos, &group) {
+            return true;
+        }
+        goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == group)
+            .is_some_and(delivery_state_passes)
     })
 }
 
@@ -269,11 +353,13 @@ pub fn groups_closed_by_update(
     groups
 }
 
-/// Completed todos whose final confidence increase was abrupt rather than
-/// accumulated in smaller evidence-backed steps. Older todo records may not
-/// have a history, so they fall back to comparing planning and completion
-/// confidence.
+/// Completed todos whose final confidence step jumped levels rather than
+/// climbing through evidence-backed states. Older todo records may not have a
+/// history, so they fall back to comparing planning and completion confidence.
 pub fn spike_completed_todos(todos: &[TodoItem]) -> Vec<&TodoItem> {
+    fn is_spike(from: ConfidenceState, to: ConfidenceState) -> bool {
+        to.level().saturating_sub(from.level()) >= TODO_CONFIDENCE_SPIKE_LEVELS
+    }
     todos
         .iter()
         .filter(|todo| todo.status == "completed")
@@ -281,12 +367,9 @@ pub fn spike_completed_todos(todos: &[TodoItem]) -> Vec<&TodoItem> {
             [] => todo
                 .confidence
                 .zip(todo.completion_confidence)
-                .is_some_and(|(first, last)| last.saturating_sub(first) >= TODO_CONFIDENCE_SPIKE),
+                .is_some_and(|(first, last)| is_spike(first, last)),
             [_] => false,
-            history => {
-                let n = history.len();
-                history[n - 1].saturating_sub(history[n - 2]) >= TODO_CONFIDENCE_SPIKE
-            }
+            history => is_spike(history[history.len() - 2], history[history.len() - 1]),
         })
         .collect()
 }
@@ -354,7 +437,7 @@ pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String 
         .copied()
         .filter(|todo| {
             todo.completion_confidence
-                .is_some_and(|score| score < QUALITY_GATE_THRESHOLD)
+                .is_some_and(|state| !completion_confidence_passes(Some(state)))
         })
         .collect();
 
@@ -406,12 +489,14 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
         || trimmed.starts_with(TODO_GATE_DIGEST_PREFIX)
+        || trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE)
 }
 
 /// Short, user-facing stand-in for a synthetic auto-poke/gate continuation.
@@ -439,8 +524,13 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     if trimmed.starts_with(TODO_GATE_DIGEST_PREFIX) {
         return Some("🔍 Reviewing the weak points of this turn for you...");
     }
-    if trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE) {
-        return Some("🔍 Checking the full outcome was owned end to end...");
+    if trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE) {
+        return Some("🔍 Rechecking the plan and assessments after extended work...");
+    }
+    if trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE)
+    {
+        return Some("🔍 Checking the delivery state of the finished work...");
     }
     if trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE) {
         return Some("🔍 Re-checking the request was understood...");
@@ -476,6 +566,62 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
 fn todo_path(session_id: &str) -> Result<PathBuf> {
     let base = storage::jcode_dir()?;
     Ok(base.join("todos").join(format!("{}.json", session_id)))
+}
+
+fn todo_review_path(session_id: &str) -> Result<PathBuf> {
+    let base = storage::jcode_dir()?;
+    Ok(base
+        .join("todos")
+        .join(format!("{}-review-state.json", session_id)))
+}
+
+/// Record the beginning of a fresh todo cycle without exposing timing metadata
+/// through the model-facing todo payload. Replacing a fully completed list with
+/// new open work starts a new cycle; ordinary edits retain the original clock.
+pub fn update_todo_review_cycle(
+    session_id: &str,
+    previous: &[TodoItem],
+    incoming: &[TodoItem],
+) -> Result<()> {
+    if incoming.is_empty() {
+        return Ok(());
+    }
+    let path = todo_review_path(session_id)?;
+    let previous_complete = !previous.is_empty()
+        && previous
+            .iter()
+            .all(|todo| todo.status.eq_ignore_ascii_case("completed"));
+    let incoming_has_open = incoming
+        .iter()
+        .any(|todo| !todo.status.eq_ignore_ascii_case("completed"));
+    if !path.exists() || (previous_complete && incoming_has_open) {
+        storage::write_json_fast(
+            &path,
+            &TodoReviewState {
+                cycle_started_at: chrono::Utc::now(),
+                review_delivered: false,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Atomically decide and mark whether the one-shot long-session assessment
+/// review is due. Marking before queueing prevents reloads from duplicating it.
+pub fn take_long_session_review_if_due(session_id: &str) -> Result<bool> {
+    let path = todo_review_path(session_id)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut state: TodoReviewState = storage::read_json(&path)?;
+    if state.review_delivered
+        || chrono::Utc::now() - state.cycle_started_at < TODO_LONG_SESSION_REVIEW_AFTER
+    {
+        return Ok(false);
+    }
+    state.review_delivered = true;
+    storage::write_json_fast(&path, &state)?;
+    Ok(true)
 }
 
 /// Goal-level assessments live beside the todo list in a separate file so the
@@ -625,19 +771,19 @@ fn gate_observations_path(session_id: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    fn intent_observation(score: Option<u8>) -> GateObservation {
+    fn intent_observation(state: Option<IntentUnderstanding>) -> GateObservation {
         GateObservation {
             kind: GateObservationKind::IntentUnderstanding,
             group: None,
-            score,
+            state: state.map(|state| state.as_str().to_string()),
         }
     }
 
-    fn loop_observation(group: Option<&str>, score: Option<u8>) -> GateObservation {
+    fn loop_observation(group: Option<&str>, state: Option<FeedbackLoopState>) -> GateObservation {
         GateObservation {
             kind: GateObservationKind::ClosedFeedbackLoop,
             group: group.map(str::to_string),
-            score,
+            state: state.map(|state| state.as_str().to_string()),
         }
     }
 
@@ -648,25 +794,28 @@ mod tests {
     #[test]
     fn digest_still_raises_a_point_whose_score_climbed_late() {
         let observations = vec![
-            intent_observation(Some(70)),
-            intent_observation(Some(80)),
-            intent_observation(Some(92)),
+            intent_observation(Some(IntentUnderstanding::Uncertain)),
+            intent_observation(Some(IntentUnderstanding::Partial)),
+            intent_observation(Some(IntentUnderstanding::Partial)),
         ];
         let climbed = TodoPlan {
-            understands_user_intent: Some(QUALITY_GATE_THRESHOLD),
-            understands_user_intent_history: vec![70, 80, 92, QUALITY_GATE_THRESHOLD],
+            understands_user_intent: Some(IntentUnderstanding::Clear),
+            understands_user_intent_history: vec![
+                IntentUnderstanding::Uncertain,
+                IntentUnderstanding::Partial,
+                IntentUnderstanding::Clear,
+            ],
             ..Default::default()
         };
         let digest = build_gate_digest(&observations, &climbed, &[])
             .expect("a late climb must still be raised, not silently dropped");
         assert_eq!(digest.matches("\n- ").count(), 1);
         // Worded as "you started without understanding", not "you never
-        // understood": the latter would contradict the passing final score and
+        // understood": the latter would contradict the passing final state and
         // invite the model to argue with the reminder instead of acting on it.
         assert!(digest.contains("started this work without understanding"));
         assert!(digest.contains("(flagged 3 times this turn)"));
         assert!(!digest.contains("never became solid"));
-        assert!(!digest.contains(&QUALITY_GATE_THRESHOLD.to_string()));
     }
 
     /// The late-climb wording is per point, so one turn can carry both a goal
@@ -674,18 +823,18 @@ mod tests {
     #[test]
     fn digest_words_late_climbs_and_never_closed_goals_differently() {
         let observations = vec![
-            loop_observation(Some("closed late"), Some(50)),
-            loop_observation(Some("never closed"), Some(50)),
+            loop_observation(Some("closed late"), Some(FeedbackLoopState::Usable)),
+            loop_observation(Some("never closed"), Some(FeedbackLoopState::Usable)),
         ];
         let goals = vec![
             TodoGoal {
                 group: Some("closed late".to_string()),
-                closed_feedback_loop: Some(QUALITY_GATE_THRESHOLD),
+                closed_feedback_loop: Some(FeedbackLoopState::Closed),
                 ..Default::default()
             },
             TodoGoal {
                 group: Some("never closed".to_string()),
-                closed_feedback_loop: Some(50),
+                closed_feedback_loop: Some(FeedbackLoopState::Usable),
                 ..Default::default()
             },
         ];
@@ -700,10 +849,10 @@ mod tests {
 
     #[test]
     fn digest_reports_a_point_that_never_resolved() {
-        let observations = vec![intent_observation(Some(70))];
+        let observations = vec![intent_observation(Some(IntentUnderstanding::Partial))];
         let unresolved = TodoPlan {
-            understands_user_intent: Some(70),
-            understands_user_intent_history: vec![70],
+            understands_user_intent: Some(IntentUnderstanding::Partial),
+            understands_user_intent_history: vec![IntentUnderstanding::Partial],
             ..Default::default()
         };
         let digest = build_gate_digest(&observations, &unresolved, &[])
@@ -713,8 +862,6 @@ mod tests {
         // Framed as verification, since by turn end the work is already done.
         assert!(digest.contains("double-check"));
         // Private calibration stays private.
-        assert!(!digest.contains("70"));
-        assert!(!digest.contains(&QUALITY_GATE_THRESHOLD.to_string()));
         assert!(!digest.to_ascii_lowercase().contains("threshold"));
     }
 
@@ -723,11 +870,11 @@ mod tests {
     #[test]
     fn digest_collapses_repeats_and_counts_them() {
         let observations: Vec<GateObservation> = (0..9)
-            .map(|_| loop_observation(Some("utf16 transcode"), Some(84)))
+            .map(|_| loop_observation(Some("utf16 transcode"), Some(FeedbackLoopState::Strong)))
             .collect();
         let goals = vec![TodoGoal {
             group: Some("utf16 transcode".to_string()),
-            closed_feedback_loop: Some(84),
+            closed_feedback_loop: Some(FeedbackLoopState::Strong),
             ..Default::default()
         }];
         let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
@@ -746,19 +893,19 @@ mod tests {
     #[test]
     fn digest_separates_goals_by_group() {
         let observations = vec![
-            loop_observation(Some("transcode"), Some(50)),
-            loop_observation(Some("render"), Some(50)),
-            loop_observation(Some("render"), Some(55)),
+            loop_observation(Some("transcode"), Some(FeedbackLoopState::Usable)),
+            loop_observation(Some("render"), Some(FeedbackLoopState::Usable)),
+            loop_observation(Some("render"), Some(FeedbackLoopState::Usable)),
         ];
         let goals = vec![
             TodoGoal {
                 group: Some("transcode".to_string()),
-                closed_feedback_loop: Some(50),
+                closed_feedback_loop: Some(FeedbackLoopState::Usable),
                 ..Default::default()
             },
             TodoGoal {
                 group: Some("render".to_string()),
-                closed_feedback_loop: Some(55),
+                closed_feedback_loop: Some(FeedbackLoopState::Usable),
                 ..Default::default()
             },
         ];
@@ -776,10 +923,10 @@ mod tests {
     #[test]
     fn digest_handles_the_ungrouped_goal() {
         let digest = build_gate_digest(
-            &[loop_observation(None, Some(10))],
+            &[loop_observation(None, Some(FeedbackLoopState::Absent))],
             &TodoPlan::default(),
             &[TodoGoal {
-                closed_feedback_loop: Some(10),
+                closed_feedback_loop: Some(FeedbackLoopState::Absent),
                 ..Default::default()
             }],
         )
@@ -797,8 +944,12 @@ mod tests {
     /// a continuation, so reload must not re-render it as a user prompt.
     #[test]
     fn digest_is_recognized_as_a_synthetic_message() {
-        let digest = build_gate_digest(&[intent_observation(Some(70))], &TodoPlan::default(), &[])
-            .expect("digest");
+        let digest = build_gate_digest(
+            &[intent_observation(Some(IntentUnderstanding::Partial))],
+            &TodoPlan::default(),
+            &[],
+        )
+        .expect("digest");
         assert!(is_auto_poke_message(&digest));
     }
 
@@ -815,9 +966,19 @@ mod tests {
                 .expect("load empty")
                 .is_empty()
         );
-        append_gate_observations(session, &[intent_observation(Some(70))]).expect("append");
-        append_gate_observations(session, &[loop_observation(Some("perf"), Some(80))])
-            .expect("append");
+        append_gate_observations(
+            session,
+            &[intent_observation(Some(IntentUnderstanding::Partial))],
+        )
+        .expect("append");
+        append_gate_observations(
+            session,
+            &[loop_observation(
+                Some("perf"),
+                Some(FeedbackLoopState::Strong),
+            )],
+        )
+        .expect("append");
         let stored = load_gate_observations(session).expect("load");
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[0].kind, GateObservationKind::IntentUnderstanding);
@@ -846,7 +1007,7 @@ mod tests {
 
         let session = "gate-observation-cap";
         let batch: Vec<GateObservation> = (0..MAX_GATE_OBSERVATIONS + 50)
-            .map(|_| intent_observation(Some(70)))
+            .map(|_| intent_observation(Some(IntentUnderstanding::Partial)))
             .collect();
         append_gate_observations(session, &batch).expect("append");
         assert_eq!(
@@ -892,7 +1053,7 @@ mod tests {
                 TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
                 "understanding of the user's intent",
             ),
-            (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "end-to-end ownership"),
+            (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "delivery state"),
             (
                 TODO_COMPLETION_CONTINUATION_MESSAGE,
                 "completion confidence",
@@ -948,9 +1109,9 @@ mod tests {
         let mut missing = todo("write the parser", "completed", None);
         missing.completion_confidence = None;
         let mut weak = todo("wire up the CLI flag", "completed", None);
-        weak.completion_confidence = Some(70);
+        weak.completion_confidence = Some(ConfidenceState::Plausible);
         let mut strong = todo("rename the module", "completed", None);
-        strong.completion_confidence = Some(99);
+        strong.completion_confidence = Some(ConfidenceState::Validated);
         let open = todo("ship it", "in_progress", None);
 
         let message =
@@ -975,11 +1136,11 @@ mod tests {
     #[test]
     fn spike_continuation_names_the_spiked_todos() {
         let mut spiked = todo("port the tests", "completed", None);
-        spiked.completion_confidence = Some(100);
-        spiked.confidence_history = vec![60, 100];
+        spiked.completion_confidence = Some(ConfidenceState::Verified);
+        spiked.confidence_history = vec![ConfidenceState::Plausible, ConfidenceState::Verified];
         let mut steady = todo("update docs", "completed", None);
-        steady.completion_confidence = Some(99);
-        steady.confidence_history = vec![95, 97, 99];
+        steady.completion_confidence = Some(ConfidenceState::Validated);
+        steady.confidence_history = vec![ConfidenceState::Plausible, ConfidenceState::Validated];
 
         let message = build_todo_confidence_spike_continuation_message(&[spiked, steady]);
         assert!(message.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE));
@@ -1006,8 +1167,8 @@ mod tests {
     #[test]
     fn detailed_gate_continuations_are_not_mistaken_for_user_messages() {
         let mut item = todo("do the thing", "completed", None);
-        item.completion_confidence = Some(50);
-        item.confidence_history = vec![10, 50];
+        item.completion_confidence = Some(ConfidenceState::Speculative);
+        item.confidence_history = vec![ConfidenceState::Speculative];
         let todos = [item];
         assert!(is_auto_poke_message(
             &build_todo_completion_continuation_message(&todos)
@@ -1022,8 +1183,8 @@ mod tests {
     #[test]
     fn gate_continuations_have_short_user_facing_summaries() {
         let mut item = todo("do the thing", "completed", None);
-        item.completion_confidence = Some(50);
-        item.confidence_history = vec![10, 50];
+        item.completion_confidence = Some(ConfidenceState::Speculative);
+        item.confidence_history = vec![ConfidenceState::Speculative];
         let todos = [item];
 
         for message in [
@@ -1048,14 +1209,18 @@ mod tests {
     #[test]
     fn confidence_spike_classifier_distinguishes_bulk_stamp_from_stepped_rise() {
         let mut bulk = todo("bulk", "completed", None);
-        bulk.confidence = Some(70);
-        bulk.completion_confidence = Some(100);
-        bulk.confidence_history = vec![70, 100];
+        bulk.confidence = Some(ConfidenceState::Plausible);
+        bulk.completion_confidence = Some(ConfidenceState::Verified);
+        bulk.confidence_history = vec![ConfidenceState::Plausible, ConfidenceState::Verified];
 
         let mut stepped = todo("stepped", "completed", None);
-        stepped.confidence = Some(100);
-        stepped.completion_confidence = Some(100);
-        stepped.confidence_history = vec![70, 80, 90, 100];
+        stepped.confidence = Some(ConfidenceState::Verified);
+        stepped.completion_confidence = Some(ConfidenceState::Verified);
+        stepped.confidence_history = vec![
+            ConfidenceState::Plausible,
+            ConfidenceState::Validated,
+            ConfidenceState::Verified,
+        ];
 
         let todos = [bulk, stepped];
         let spiked = spike_completed_todos(&todos);
@@ -1066,13 +1231,13 @@ mod tests {
     #[test]
     fn confidence_spike_classifier_includes_boundary_and_legacy_fallback() {
         let mut boundary = todo("boundary", "completed", None);
-        boundary.confidence = Some(85);
-        boundary.completion_confidence = Some(100);
-        boundary.confidence_history = vec![85, 100];
+        boundary.confidence = Some(ConfidenceState::Plausible);
+        boundary.completion_confidence = Some(ConfidenceState::Verified);
+        boundary.confidence_history = vec![ConfidenceState::Plausible, ConfidenceState::Verified];
 
         let mut legacy = todo("legacy", "completed", None);
-        legacy.confidence = Some(80);
-        legacy.completion_confidence = Some(100);
+        legacy.confidence = Some(ConfidenceState::Speculative);
+        legacy.completion_confidence = Some(ConfidenceState::Verified);
 
         let todos = [boundary, legacy];
         let spiked = spike_completed_todos(&todos);
@@ -1109,39 +1274,224 @@ mod tests {
         }
     }
 
-    fn ownership_goal(group: Option<&str>, ownership: Option<u8>) -> TodoGoal {
+    #[test]
+    fn long_session_review_is_private_durable_and_one_shot() {
+        let _guard = storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "long-review-one-shot";
+        let todos = vec![todo("work", "in_progress", Some("ship"))];
+
+        update_todo_review_cycle(session, &[], &todos).expect("start cycle");
+        assert!(!take_long_session_review_if_due(session).expect("fresh cycle"));
+
+        let path = todo_review_path(session).expect("review path");
+        storage::write_json_fast(
+            &path,
+            &TodoReviewState {
+                cycle_started_at: chrono::Utc::now()
+                    - TODO_LONG_SESSION_REVIEW_AFTER
+                    - chrono::Duration::seconds(1),
+                review_delivered: false,
+            },
+        )
+        .expect("age cycle");
+        assert!(take_long_session_review_if_due(session).expect("due review"));
+        assert!(!take_long_session_review_if_due(session).expect("one shot"));
+        assert!(!TODO_LONG_SESSION_REVIEW_MESSAGE.contains("30"));
+        assert!(
+            !TODO_LONG_SESSION_REVIEW_MESSAGE
+                .to_ascii_lowercase()
+                .contains("threshold")
+        );
+        assert!(is_auto_poke_message(TODO_LONG_SESSION_REVIEW_MESSAGE));
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    fn delivery_goal(group: Option<&str>, delivery: Option<DeliveryState>) -> TodoGoal {
         TodoGoal {
             group: group.map(str::to_string),
-            end_to_end_ownership: ownership,
+            delivery_state: delivery,
+            autonomy: Some(Autonomy::NecessaryFollowthrough),
+            iteration_maturity: Some(IterationMaturity::OutcomeReached),
             ..Default::default()
         }
     }
 
     #[test]
-    fn newly_completed_group_requires_sufficient_end_to_end_ownership() {
+    fn newly_completed_group_requires_sufficient_delivery() {
         let previous = vec![todo("work", "in_progress", Some("ship"))];
         let completed = vec![todo("work", "completed", Some("ship"))];
 
-        for ownership in [None, Some(0), Some(95)] {
-            assert!(!newly_completed_groups_have_sufficient_ownership(
+        for delivery in [
+            None,
+            Some(DeliveryState::ChangeMade),
+            Some(DeliveryState::Integrated),
+        ] {
+            assert!(!newly_completed_groups_have_sufficient_delivery(
                 &previous,
                 &completed,
-                &[ownership_goal(Some("ship"), ownership)],
+                &[delivery_goal(Some("ship"), delivery)],
             ));
         }
-        assert!(newly_completed_groups_have_sufficient_ownership(
+        assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
             &completed,
-            &[ownership_goal(Some("ship"), Some(96))],
+            &[delivery_goal(
+                Some("ship"),
+                Some(DeliveryState::WorkflowValidated)
+            )],
+        ));
+    }
+
+    /// Difficulty never raises the delivery bar by itself. Operational outcome
+    /// delivery comes from the request, not from how hard implementation was.
+    #[test]
+    fn difficulty_is_descriptive_and_never_raises_the_delivery_bar() {
+        let previous = vec![todo("work", "in_progress", Some("ship"))];
+        let completed = vec![todo("work", "completed", Some("ship"))];
+
+        let mut hard = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+        hard.difficulty = Some(Difficulty::Hard);
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[hard.clone()],
+        ));
+        hard.delivery_state = Some(DeliveryState::OutcomeDelivered);
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[hard],
+        ));
+
+        // A trivial goal, and one with no difficulty at all, pass at
+        // workflow_validated: absent difficulty is never punished.
+        for difficulty in [None, Some(Difficulty::Trivial), Some(Difficulty::Routine)] {
+            let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+            goal.difficulty = difficulty;
+            assert!(newly_completed_groups_have_sufficient_delivery(
+                &previous,
+                &completed,
+                &[goal],
+            ));
+        }
+
+        assert_eq!(
+            required_delivery_state(Some(Difficulty::Involved)),
+            DeliveryState::WorkflowValidated
+        );
+        assert_eq!(
+            required_delivery_state(None),
+            DeliveryState::WorkflowValidated
+        );
+    }
+
+    #[test]
+    fn research_completion_requires_stopping_evidence() {
+        let previous = vec![todo("work", "in_progress", Some("ship"))];
+        let completed = vec![todo("work", "completed", Some("ship"))];
+        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+        goal.difficulty = Some(Difficulty::Research);
+        goal.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
+
+        assert!(!newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[goal.clone()],
+        ));
+        goal.stopping_evidence =
+            Some("Three materially different approaches plateaued at the same score".to_string());
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[goal],
         ));
     }
 
     #[test]
-    fn ownership_is_not_required_before_group_completion() {
+    fn autonomy_requires_necessary_followthrough_at_completion() {
+        let previous = vec![todo("work", "in_progress", Some("ship"))];
+        let completed = vec![todo("work", "completed", Some("ship"))];
+        for autonomy in [None, Some(Autonomy::RequestedOnly)] {
+            let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+            goal.autonomy = autonomy;
+            assert!(!newly_completed_groups_have_sufficient_delivery(
+                &previous,
+                &completed,
+                &[goal],
+            ));
+        }
+        for autonomy in [
+            Autonomy::NecessaryFollowthrough,
+            Autonomy::Proactive,
+            Autonomy::Stewardship,
+        ] {
+            let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+            goal.autonomy = Some(autonomy);
+            assert!(newly_completed_groups_have_sufficient_delivery(
+                &previous,
+                &completed,
+                &[goal],
+            ));
+        }
+    }
+
+    #[test]
+    fn iteration_maturity_requires_terminal_basis_and_supporting_evidence() {
+        let previous = vec![todo("work", "in_progress", Some("search"))];
+        let completed = vec![todo("work", "completed", Some("search"))];
+        for maturity in [
+            None,
+            Some(IterationMaturity::NotStarted),
+            Some(IterationMaturity::Exploring),
+            Some(IterationMaturity::Improving),
+            Some(IterationMaturity::PlateauUnproven),
+        ] {
+            let mut goal = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+            goal.iteration_maturity = maturity;
+            assert!(!newly_completed_groups_have_sufficient_delivery(
+                &previous,
+                &completed,
+                &[goal],
+            ));
+        }
+
+        let mut plateau = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+        plateau.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
+        assert!(!newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[plateau.clone()],
+        ));
+        plateau.stopping_evidence = Some(
+            "Two distinct post-best approaches regressed under the same benchmark".to_string(),
+        );
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[plateau],
+        ));
+
+        let outcome = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[outcome],
+        ));
+    }
+
+    #[test]
+    fn delivery_is_not_required_before_group_completion() {
         let previous = vec![todo("work", "pending", Some("ship"))];
         let in_progress = vec![todo("work", "in_progress", Some("ship"))];
 
-        assert!(newly_completed_groups_have_sufficient_ownership(
+        assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
             &in_progress,
             &[],
@@ -1149,41 +1499,49 @@ mod tests {
     }
 
     #[test]
-    fn ownership_gate_normalizes_groups_and_supports_ungrouped_work() {
+    fn delivery_gate_normalizes_groups_and_supports_ungrouped_work() {
         let previous = vec![todo("work", "in_progress", Some(" ship "))];
         let completed = vec![todo("work", "completed", Some("ship"))];
-        assert!(newly_completed_groups_have_sufficient_ownership(
+        assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
             &completed,
-            &[ownership_goal(Some(" ship"), Some(96))],
+            &[delivery_goal(
+                Some(" ship"),
+                Some(DeliveryState::OutcomeDelivered)
+            )],
         ));
 
         let previous = vec![todo("work", "in_progress", None)];
         let completed = vec![todo("work", "completed", None)];
-        assert!(newly_completed_groups_have_sufficient_ownership(
+        assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
             &completed,
-            &[ownership_goal(None, Some(96))],
+            &[delivery_goal(None, Some(DeliveryState::OutcomeDelivered))],
         ));
     }
 
-    /// The rejection is silent about *how* to clear it unless the message names
-    /// the field. A caller that cannot tell which field to raise reads the
-    /// rejection as a stuck tool and retries the same payload indefinitely.
+    /// The turn-finish gate must tell the model how to clear it without implying
+    /// that the todo write which triggered the check was discarded.
     #[test]
     fn ownership_message_names_the_field_that_must_be_raised() {
-        assert!(
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("end_to_end_ownership"),
-            "the ownership nudge must name the field to raise"
-        );
+        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("iteration maturity"));
+        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("autonomy"));
+        for private_calibration in [
+            "necessary_followthrough",
+            "outcome_reached",
+            "plateau_confirmed",
+            "budget_exhausted",
+        ] {
+            assert!(!TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains(private_calibration));
+        }
         assert!(
             TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("call the todo tool again"),
-            "the ownership nudge must say to retry the write"
+            "the ownership nudge must say how to update the assessment"
         );
-        // The write is discarded, so a caller must know its list was not saved.
         assert!(
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
-            "the ownership nudge must disclose that the write was rejected"
+            !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("rejected")
+                && !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
+            "the turn-finish nudge must not claim the already-saved write was discarded"
         );
         // Every gate message that requires a specific field should name it, so
         // this property is asserted for the sibling gates too.
@@ -1191,9 +1549,34 @@ mod tests {
     }
 
     #[test]
-    fn ownership_gate_grandfathers_preexisting_completed_groups() {
+    fn completed_groups_require_sufficient_delivery_at_turn_finish() {
+        let incomplete = vec![todo("work", "in_progress", Some("ship"))];
+        assert!(completed_groups_have_sufficient_delivery(&incomplete, &[]));
+
+        let completed = vec![todo("work", "completed", Some("ship"))];
+        for delivery in [
+            None,
+            Some(DeliveryState::ChangeMade),
+            Some(DeliveryState::Integrated),
+        ] {
+            assert!(!completed_groups_have_sufficient_delivery(
+                &completed,
+                &[delivery_goal(Some("ship"), delivery)],
+            ));
+        }
+        assert!(completed_groups_have_sufficient_delivery(
+            &completed,
+            &[delivery_goal(
+                Some("ship"),
+                Some(DeliveryState::WorkflowValidated)
+            )],
+        ));
+    }
+
+    #[test]
+    fn delivery_gate_grandfathers_preexisting_completed_groups() {
         let completed = vec![todo("legacy", "completed", Some("legacy"))];
-        assert!(newly_completed_groups_have_sufficient_ownership(
+        assert!(newly_completed_groups_have_sufficient_delivery(
             &completed,
             &completed,
             &[],
@@ -1232,7 +1615,7 @@ mod tests {
         let todos = vec![todo("Run targeted tests", "in_progress", None)];
         let plan = TodoPlan {
             user_intention: Some("Keep resumed work easy to identify".to_string()),
-            understands_user_intent: Some(97),
+            understands_user_intent: Some(IntentUnderstanding::Clear),
             ..Default::default()
         };
 
@@ -1255,7 +1638,7 @@ mod tests {
 
         let plan = TodoPlan {
             user_intention: Some("Preserve why the user requested the work".to_string()),
-            understands_user_intent: Some(97),
+            understands_user_intent: Some(IntentUnderstanding::Clear),
             ..Default::default()
         };
         save_plan("user-intention-round-trip", &plan).expect("save plan");

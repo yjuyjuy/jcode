@@ -108,7 +108,7 @@ impl TranscriptCache {
                 .get(index)
                 .is_some_and(|(role, source)| *role == message.role && source == &message.source);
             if reusable {
-                // Delivery is drawn, not laid out: an ack moves a dot and
+                // Delivery is drawn, not laid out: an ack changes a tone and
                 // offsets the card, and neither changes where the text wraps.
                 // Refreshing it on a hit is what lets the acknowledgement land
                 // without re-laying the message that was acknowledged.
@@ -118,6 +118,7 @@ impl TranscriptCache {
                     // drawn width, so a tick that leaves the label unchanged
                     // must move the bar without re-laying the card.
                     entry.permille = message.permille;
+                    entry.todo_states.clone_from(&message.todo_states);
                 }
                 self.hits += 1;
                 continue;

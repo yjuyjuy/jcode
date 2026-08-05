@@ -12,12 +12,10 @@
 //! holding it back (the agent is mid-turn, and the daemon rejects a second
 //! message outright), `Sent` the moment it leaves the composer, `Acked` when
 //! the daemon confirms the agent took it (`ApiEvent::MessageAccepted`). The
-//! difference is shown twice over, because one channel is not enough: a small
-//! dot beside the card (hollow while pending, solid once acked) is the
-//! *state*, and a short damped wiggle of the card is the *transition*. Motion
-//! is what the eye notices without looking, which is exactly the right weight
-//! for "it arrived". A queued card is additionally drawn in a fainter tone,
-//! because "this has not gone anywhere yet" is a bigger claim than a dot.
+//! difference is shown two ways: a pending card is drawn in a fainter tone
+//! (the *state*), and a short damped wiggle of the card reports the
+//! acknowledgement (the *transition*). Motion is what the eye notices without
+//! looking, which is exactly the right weight for "it arrived".
 //!
 //! Like the rest of this app's animation, the wiggle is derived from
 //! (state, now) rather than driven by a timer: a frame stays a pure function of
@@ -43,17 +41,24 @@ const WIGGLE_CYCLES: f64 = 2.0;
 /// display rather than by whatever else happens to want frames.
 pub const FRAME: Duration = Duration::from_millis(8);
 
-/// Radius of the delivery dot, in logical pixels.
-pub const DOT_RADIUS: f64 = 2.6;
-
-/// Gap between the dot and the card's right text edge.
-pub const DOT_GAP: f64 = 7.0;
-
 /// Opacity of a message the agent has not confirmed yet: queued in this
 /// window, or written to the socket without an acknowledgement. Faint enough
 /// to read as "not landed", solid enough to stay legible, because the text
 /// may be waiting a whole turn.
-pub const PENDING_TONE: f64 = 0.55;
+///
+/// The number is set by the *dark* theme, not by taste. A layer alpha
+/// composites the card toward the page, so on paper a pending message gets
+/// lighter and on black it gets darker; the same alpha costs far more
+/// contrast on black, because dark-mode body ink starts nearer the middle of
+/// the range than black ink on white does. At 0.55 the user's own words came
+/// out mid-grey on black, which read as *disabled text* rather than as
+/// *message in flight*, and the one thing a person must always be able to
+/// read back is what they just typed. 0.78 is the highest tone that is still
+/// visibly a step down from acknowledged ink, and it keeps both themes above
+/// the contrast floor asserted in `the_pending_tone_stays_readable_in_both_themes`.
+/// The *state* is carried by the dot and the card, which do not fade away;
+/// the tone is only the supporting cue.
+pub const PENDING_TONE: f64 = 0.78;
 
 /// Where a user's message is on its way to the agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +134,57 @@ impl Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pending tone is a layer alpha over the page, so what it costs
+    /// depends on the theme underneath it. This is the regression that made a
+    /// prompt unreadable in dark mode: a value chosen against white paper was
+    /// applied to body ink on black, where the same alpha eats far more
+    /// contrast. Both themes are checked, so neither can be tuned into the
+    /// floor by a change made while looking at the other one.
+    #[test]
+    fn the_pending_tone_stays_readable_in_both_themes() {
+        let luma = |color: vello::peniko::Color| {
+            let [r, g, b, _] = color.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for theme in [
+            crate::theme::Theme::print_light(),
+            crate::theme::Theme::print_dark(),
+        ] {
+            let page = luma(theme.background);
+            // What the eye actually sees: the card's text composited onto the
+            // page at the pending alpha.
+            let composited = luma(theme.text) * PENDING_TONE + page * (1.0 - PENDING_TONE);
+            let contrast = (composited - page).abs();
+            assert!(
+                contrast > 0.55,
+                "a pending message is unreadable in {:?} (contrast {contrast:.2})",
+                theme.mode
+            );
+            // And it must still be a visible step down from acknowledged ink,
+            // or the tone says nothing and the dot is carrying the state alone.
+            let acked = (luma(theme.text) - page).abs();
+            assert!(
+                contrast < acked - 0.05,
+                "the pending tone is indistinguishable from acknowledged ink in {:?}",
+                theme.mode
+            );
+        }
+    }
+
+    /// The ramp has to end on solid ink and start at the pending tone, so a
+    /// dropped frame lands on a readable message rather than on a washed one.
+    #[test]
+    fn the_tone_ramps_from_pending_to_solid() {
+        let at = Instant::now();
+        assert_eq!(Delivery::Sent.tone(at), PENDING_TONE);
+        assert_eq!(Delivery::Queued.tone(at), PENDING_TONE);
+        let acked = Delivery::Acked { at };
+        assert_eq!(acked.tone(at), PENDING_TONE);
+        assert!(acked.tone(at + WIGGLE / 2) > PENDING_TONE);
+        assert_eq!(acked.tone(at + WIGGLE), 1.0);
+        assert_eq!(acked.tone(at + WIGGLE * 3), 1.0);
+    }
 
     #[test]
     fn a_pending_message_does_not_move_or_ask_for_frames() {

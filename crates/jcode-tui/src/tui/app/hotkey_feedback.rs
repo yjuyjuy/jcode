@@ -291,8 +291,13 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
     );
     out.push(KnownHotkey::new(
         ctrl('l'),
-        "clear_view",
-        "clear the view, keeping context (/cls)",
+        "clear_screen",
+        "clear the screen; history stays in scrollback",
+    ));
+    out.push(KnownHotkey::new(
+        key(KeyCode::Char('l'), KeyModifiers::SUPER),
+        "clear_screen",
+        "clear the screen; history stays in scrollback",
     ));
 
     // Built-in readline-style editing chords.

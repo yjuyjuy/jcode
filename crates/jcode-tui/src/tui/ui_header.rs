@@ -504,6 +504,31 @@ fn header_provider_label(
     }
 }
 
+/// Active multi-account label for the current provider, when more than one
+/// account is configured. Returns `None` for single-account setups so the
+/// header stays uncluttered for the common case.
+fn active_account_suffix(provider_name: &str) -> Option<String> {
+    use jcode_provider_core::ActiveProvider;
+    let provider = jcode_provider_core::parse_provider_hint(provider_name)?;
+    let (label, count) = match provider {
+        ActiveProvider::Claude => (
+            crate::auth::claude::active_account_label(),
+            crate::auth::claude::list_accounts()
+                .map(|a| a.len())
+                .unwrap_or(0),
+        ),
+        ActiveProvider::OpenAI => (
+            crate::auth::codex::active_account_label(),
+            crate::auth::codex::list_accounts()
+                .map(|a| a.len())
+                .unwrap_or(0),
+        ),
+        _ => return None,
+    };
+    // Only surface the label when the user actually juggles multiple accounts.
+    if count > 1 { label } else { None }
+}
+
 fn abbreviate_home(path: &str) -> String {
     if let Some(home) = dirs::home_dir() {
         let home_str = home.display().to_string();
@@ -797,6 +822,13 @@ fn build_persistent_header_with_auth(
     ));
     if let Some(upstream) = upstream.as_deref() {
         let suffix = format!(" via {}", upstream);
+        if model_line_len + suffix.chars().count() <= fit_width {
+            model_line_len += suffix.chars().count();
+            model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
+        }
+    }
+    if !model_is_placeholder && let Some(account) = active_account_suffix(&app.provider_name()) {
+        let suffix = format!(" · {}", account);
         if model_line_len + suffix.chars().count() <= fit_width {
             model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
         }
