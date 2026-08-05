@@ -306,7 +306,6 @@ const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "read",
-    "schedule",
     "skill_manage",
     "write",
 ];
@@ -449,15 +448,6 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Read".to_string(),
                     description: "Reads a file from the local filesystem.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["schedule"],
-                ApiTool {
-                    name: "ScheduleWakeup".to_string(),
-                    description: "Schedule when to resume work in /loop dynamic mode.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"delaySeconds":{"type":"number"},"reason":{"type":"string"},"prompt":{"type":"string"}},"required":["delaySeconds","reason","prompt"],"additionalProperties":false}),
                     cache_control: None,
                 },
             ),
@@ -1133,6 +1123,46 @@ mod cache_prefix_invariant_tests {
             formatted.last().map(|t| t.name.as_str()),
             with_cache.first().copied(),
             "cache breakpoint must be on the final tool"
+        );
+    }
+
+    #[test]
+    fn oauth_forwards_schedule_backend_schema_under_scheduled_wakeup_name() {
+        // Regression: the OAuth surface previously advertised a hand-tuned
+        // `ScheduleWakeup` schema (`delaySeconds`/`reason`/`prompt`) that did
+        // not match the `schedule` backend, so every create call failed with
+        // "task is required for action=create". The tool now flows through the
+        // generic registry-forwarding path, so the advertised schema is the
+        // real backend schema (single source of truth) under the mapped name.
+        let schedule = ToolDefinition {
+            name: "schedule".to_string(),
+            description: "Schedule, list, or cancel future tasks.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "list", "cancel"]},
+                    "task": {"type": "string"},
+                    "wake_in_minutes": {"type": "integer"},
+                    "wake_at": {"type": "string"},
+                },
+            }),
+        };
+        let formatted = format_tools(&[schedule], true, false);
+        let tool = formatted
+            .iter()
+            .find(|t| t.name == "ScheduleWakeup")
+            .expect("schedule must be advertised as ScheduleWakeup on OAuth");
+
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("schedule schema must expose properties");
+        assert!(
+            properties.contains_key("task"),
+            "OAuth ScheduleWakeup must expose the backend `task` param: {properties:?}"
+        );
+        assert!(
+            !properties.contains_key("delaySeconds"),
+            "OAuth ScheduleWakeup must not advertise the fabricated `delaySeconds` param: {properties:?}"
         );
     }
 }
