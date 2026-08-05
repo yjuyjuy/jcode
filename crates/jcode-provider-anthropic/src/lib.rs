@@ -1080,6 +1080,46 @@ mod cache_prefix_invariant_tests {
             "cache breakpoint must be on the final tool"
         );
     }
+
+    #[test]
+    fn oauth_forwards_schedule_backend_schema_under_scheduled_wakeup_name() {
+        // Regression: the OAuth surface previously advertised a hand-tuned
+        // `ScheduleWakeup` schema (`delaySeconds`/`reason`/`prompt`) that did
+        // not match the `schedule` backend, so every create call failed with
+        // "task is required for action=create". The tool now flows through the
+        // generic registry-forwarding path, so the advertised schema is the
+        // real backend schema (single source of truth) under the mapped name.
+        let schedule = ToolDefinition {
+            name: "schedule".to_string(),
+            description: "Schedule, list, or cancel future tasks.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "list", "cancel"]},
+                    "task": {"type": "string"},
+                    "wake_in_minutes": {"type": "integer"},
+                    "wake_at": {"type": "string"},
+                },
+            }),
+        };
+        let formatted = format_tools(&[schedule], true, false);
+        let tool = formatted
+            .iter()
+            .find(|t| t.name == "ScheduleWakeup")
+            .expect("schedule must be advertised as ScheduleWakeup on OAuth");
+
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("schedule schema must expose properties");
+        assert!(
+            properties.contains_key("task"),
+            "OAuth ScheduleWakeup must expose the backend `task` param: {properties:?}"
+        );
+        assert!(
+            !properties.contains_key("delaySeconds"),
+            "OAuth ScheduleWakeup must not advertise the fabricated `delaySeconds` param: {properties:?}"
+        );
+    }
 }
 
 #[cfg(test)]
