@@ -1,234 +1,19 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
-fn merge_string_sets(existing: &Value, incoming: &Value) -> Option<Value> {
-    fn collect_strings(value: &Value) -> Option<Vec<String>> {
-        match value {
-            Value::String(s) => Some(vec![s.clone()]),
-            Value::Array(items) => items
-                .iter()
-                .map(|item| item.as_str().map(ToString::to_string))
-                .collect(),
-            _ => None,
-        }
-    }
-
-    let mut combined = collect_strings(existing)?;
-    for item in collect_strings(incoming)? {
-        if !combined.contains(&item) {
-            combined.push(item);
-        }
-    }
-
-    if combined.len() == 1 {
-        Some(Value::String(combined.remove(0)))
-    } else {
-        Some(Value::Array(
-            combined.into_iter().map(Value::String).collect(),
-        ))
-    }
-}
-
-fn merge_schema_objects(
-    target: &mut serde_json::Map<String, Value>,
-    incoming: &serde_json::Map<String, Value>,
-) {
-    for (key, incoming_value) in incoming {
-        match key.as_str() {
-            "properties" | "$defs" | "definitions" | "patternProperties" => {
-                let Some(incoming_children) = incoming_value.as_object() else {
-                    target.insert(key.clone(), incoming_value.clone());
-                    continue;
-                };
-
-                match target.get_mut(key) {
-                    Some(Value::Object(existing_children)) => {
-                        for (child_key, child_value) in incoming_children {
-                            if let Some(existing_child) = existing_children.get_mut(child_key) {
-                                merge_schema_values(existing_child, child_value.clone());
-                            } else {
-                                existing_children.insert(child_key.clone(), child_value.clone());
-                            }
-                        }
-                    }
-                    _ => {
-                        target.insert(key.clone(), Value::Object(incoming_children.clone()));
-                    }
-                }
-            }
-            "required" | "enum" | "type" => match target.get_mut(key) {
-                Some(existing_value) => {
-                    if let Some(merged) = merge_string_sets(existing_value, incoming_value) {
-                        *existing_value = merged;
-                    }
-                }
-                None => {
-                    target.insert(key.clone(), incoming_value.clone());
-                }
-            },
-            "description" | "title" => {
-                target
-                    .entry(key.clone())
-                    .or_insert_with(|| incoming_value.clone());
-            }
-            "additionalProperties" => match target.get_mut(key) {
-                Some(Value::Bool(existing_bool)) => {
-                    if incoming_value == &Value::Bool(false) {
-                        *existing_bool = false;
-                    }
-                }
-                Some(Value::Object(existing_obj)) => {
-                    if let Value::Object(incoming_obj) = incoming_value {
-                        merge_schema_objects(existing_obj, incoming_obj);
-                    } else if incoming_value == &Value::Bool(false) {
-                        target.insert(key.clone(), Value::Bool(false));
-                    }
-                }
-                Some(_) => {
-                    if incoming_value == &Value::Bool(false) {
-                        target.insert(key.clone(), Value::Bool(false));
-                    }
-                }
-                None => {
-                    target.insert(key.clone(), incoming_value.clone());
-                }
-            },
-            _ => match target.get_mut(key) {
-                Some(existing_value) => merge_schema_values(existing_value, incoming_value.clone()),
-                None => {
-                    target.insert(key.clone(), incoming_value.clone());
-                }
-            },
-        }
-    }
-}
-
-fn merge_schema_values(existing: &mut Value, incoming: Value) {
-    if *existing == incoming {
-        return;
-    }
-
-    match incoming {
-        Value::Object(incoming_map) => {
-            if let Value::Object(existing_map) = existing {
-                merge_schema_objects(existing_map, &incoming_map);
-            } else {
-                *existing = Value::Object(incoming_map);
-            }
-        }
-        Value::Array(incoming_items) => {
-            if let Value::Array(existing_items) = existing {
-                if existing_items != &incoming_items {
-                    for item in incoming_items {
-                        if !existing_items.contains(&item) {
-                            existing_items.push(item);
-                        }
-                    }
-                }
-            } else {
-                *existing = Value::Array(incoming_items);
-            }
-        }
-        incoming_value => {
-            *existing = incoming_value;
-        }
-    }
-}
-
-fn flatten_all_of_schema(mut map: serde_json::Map<String, Value>) -> Value {
-    let Some(Value::Array(all_of_items)) = map.remove("allOf") else {
-        return Value::Object(map);
-    };
-
-    let mut merged = map;
-    let mut fallback_any_of = Vec::new();
-
-    for item in all_of_items {
-        match item {
-            Value::Object(item_map) => merge_schema_objects(&mut merged, &item_map),
-            other => fallback_any_of.push(other),
-        }
-    }
-
-    if !fallback_any_of.is_empty() {
-        match merged.get_mut("anyOf") {
-            Some(Value::Array(existing_any_of)) => existing_any_of.extend(fallback_any_of),
-            _ => {
-                merged.insert("anyOf".to_string(), Value::Array(fallback_any_of));
-            }
-        }
-    }
-
-    Value::Object(merged)
-}
-
+/// Normalize a tool-parameter schema for the OpenAI function-parameters subset.
+///
+/// One construct OpenAI rejects fails the entire tool catalog rather than the
+/// one tool, which is why this class of bug (#446, #495, #543, #687, #711, #713,
+/// #754) has recurred: each fix appended a keyword to a deny-list, so the next
+/// unlisted keyword from the next MCP server was the next outage.
+///
+/// The subset is now an allow-list in `jcode-schema-dialect`, shared with every
+/// other provider, so a construct nobody has seen yet is dropped rather than
+/// forwarded. Strict-mode eligibility and normalization stay here: they are
+/// OpenAI-specific and have no dialect equivalent.
 pub fn openai_compatible_schema(schema: &Value) -> Value {
-    match schema {
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (key, value) in map {
-                if is_openai_unsupported_keyword(key) {
-                    continue;
-                }
-                let normalized_key = if key == "oneOf" { "anyOf" } else { key };
-                out.insert(
-                    normalized_key.to_string(),
-                    openai_compatible_keyword(key, value),
-                );
-            }
-            flatten_all_of_schema(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(openai_compatible_schema).collect()),
-        _ => schema.clone(),
-    }
-}
-
-/// JSON Schema keywords that are valid JSON Schema 2020-12 but rejected by the
-/// OpenAI function-parameters subset. One unsupported keyword invalidates the
-/// entire tool catalog, so they are stripped instead of failing the request
-/// (see issue #687). Constraints they express (e.g. `uniqueItems`) stay
-/// enforced by the tool/MCP server at execution time.
-const OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
-    "uniqueItems",
-    "contains",
-    "minContains",
-    "maxContains",
-    "unevaluatedItems",
-    "unevaluatedProperties",
-    "propertyNames",
-    "minProperties",
-    "maxProperties",
-    "dependentSchemas",
-    "dependentRequired",
-    "if",
-    "then",
-    "else",
-    "not",
-];
-
-fn is_openai_unsupported_keyword(key: &str) -> bool {
-    OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS.contains(&key)
-}
-
-/// Recurse into a keyword's value while respecting whether the value is a
-/// schema, a map of schemas, or plain data. Without this, a property literally
-/// named `uniqueItems` inside `properties` would be stripped.
-fn openai_compatible_keyword(key: &str, value: &Value) -> Value {
-    match key {
-        "properties" | "$defs" | "definitions" | "patternProperties" => match value {
-            Value::Object(children) => Value::Object(
-                children
-                    .iter()
-                    .map(|(child_key, child_value)| {
-                        (child_key.clone(), openai_compatible_schema(child_value))
-                    })
-                    .collect(),
-            ),
-            other => openai_compatible_schema(other),
-        },
-        "enum" | "const" | "examples" | "default" => value.clone(),
-        _ => openai_compatible_schema(value),
-    }
+    jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENAI)
 }
 
 pub fn schema_supports_strict(schema: &Value) -> bool {
@@ -255,6 +40,55 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
                 return false;
             }
         }
+        // A declared property that says nothing about its type is legal JSON
+        // Schema (an empty schema accepts anything) and Anthropic takes it, but
+        // OpenAI's strict validator rejects the whole catalog over it (#713:
+        // cua-driver's `set_config.value`, whose type genuinely depends on
+        // `key`). Strict eligibility must fail closed here: the schema is still
+        // sent, just without `strict: true`, so the tool stays usable.
+        if let Some(Value::Object(properties)) = map.get("properties")
+            && properties
+                .values()
+                .any(|property| !declares_a_type(property))
+        {
+            return false;
+        }
+
+        // The same rule inside a combiner. A branch that only adds a
+        // constraint (`{"required": ["memory_id"]}`) or only an enum, with no
+        // type of its own, cannot satisfy OpenAI's strict object requirements
+        // and fails the whole catalog (#711, observed on a real MCP catalog).
+        //
+        // Branches are held to a stricter bar than properties: a bare `enum`
+        // is enough to describe a property, but a combiner branch must name a
+        // `type` (OpenAI reports "schema must have a 'type' key"), which is the
+        // same rule the registry-wide sweep already enforces on jcode's own
+        // tools.
+        for combiner in ["anyOf", "oneOf", "allOf"] {
+            if let Some(Value::Array(branches)) = map.get(combiner)
+                && branches.iter().any(|branch| !branch_names_a_type(branch))
+            {
+                return false;
+            }
+        }
+
+        // An array whose `items` are unconstrained: strict mode requires the
+        // element shape to be known (#711).
+        let is_array_typed = match map.get("type") {
+            Some(Value::String(t)) => t == "array",
+            Some(Value::Array(types)) => types.iter().any(|v| v.as_str() == Some("array")),
+            _ => false,
+        };
+        if is_array_typed && !map.get("items").is_some_and(declares_a_type) {
+            return false;
+        }
+
+        // A `$ref` that survived normalization points at a definition the
+        // request does not carry (`$defs` is stripped for some paths), so the
+        // strict validator cannot resolve it (#711).
+        if map.contains_key("$ref") {
+            return false;
+        }
 
         map.values().all(schema_supports_strict)
     }
@@ -264,6 +98,47 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
         Value::Array(items) => items.iter().all(schema_supports_strict),
         _ => true,
     }
+}
+
+/// Whether a subschema says anything about what it accepts.
+///
+/// `true` for a boolean schema: `true`/`false` are complete JSON Schemas whose
+/// meaning is unambiguous, unlike an object that simply omits `type`.
+fn declares_a_type(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return schema.is_boolean();
+    };
+    const TYPE_BEARING_KEYWORDS: &[&str] = &[
+        "type",
+        "enum",
+        "const",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "$ref",
+        "properties",
+        "items",
+    ];
+    TYPE_BEARING_KEYWORDS
+        .iter()
+        .any(|keyword| map.contains_key(*keyword))
+}
+
+/// Whether a combiner branch names a concrete `type`.
+///
+/// Stricter than [`declares_a_type`]: OpenAI accepts a property described only
+/// by an `enum`, but rejects a *branch* that does not name a `type`, which is
+/// what #711's `mcp__cirqul__create_object` hit with an enum-only `anyOf`
+/// branch. A nested combiner is accepted here and validated on recursion.
+fn branch_names_a_type(branch: &Value) -> bool {
+    let Some(map) = branch.as_object() else {
+        return branch.is_boolean();
+    };
+    map.contains_key("type")
+        || map.contains_key("$ref")
+        || ["anyOf", "oneOf", "allOf"]
+            .iter()
+            .any(|combiner| map.contains_key(*combiner))
 }
 
 fn schema_is_object_typed(map: &serde_json::Map<String, Value>) -> bool {
@@ -689,5 +564,133 @@ mod tests {
             json!("boolean")
         );
         assert_eq!(normalized["properties"]["not"]["type"], json!("string"));
+    }
+
+    /// Issue #713: `cua-driver`'s `set_config.value` declares a description and
+    /// no type, because its type genuinely depends on the sibling `key`. That
+    /// is legal JSON Schema and Anthropic accepts it, but OpenAI's strict
+    /// validator rejects the entire tool catalog over it, so every
+    /// OpenAI-route agent died on its first turn.
+    ///
+    /// The fix is to fail strict eligibility closed rather than to rewrite the
+    /// schema: the tool is still advertised with its real shape, just without
+    /// `strict: true`.
+    #[test]
+    fn issue_713_a_property_without_a_type_disqualifies_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "value": { "description": "JSON type depends on the key." }
+            }
+        });
+        assert!(
+            !schema_supports_strict(&openai_compatible_schema(&schema)),
+            "a typeless property must not be sent as a strict schema"
+        );
+    }
+
+    /// The counterpart: failing closed must not become failing always, or every
+    /// well-formed tool silently loses strict mode and the structured-output
+    /// guarantees that come with it.
+    #[test]
+    fn a_fully_typed_schema_still_qualifies_for_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "where" },
+                "count": { "type": "integer" },
+                "mode": { "enum": ["fast", "slow"] },
+                "nested": {
+                    "type": "object",
+                    "properties": { "inner": { "type": "boolean" } }
+                },
+                "either": { "anyOf": [{ "type": "string" }, { "type": "integer" }] },
+                "anything": true
+            },
+            "required": ["path"]
+        });
+        assert!(
+            schema_supports_strict(&openai_compatible_schema(&schema)),
+            "every property declares its shape, so strict must stay available"
+        );
+    }
+
+    /// Issue #711, reproduced independently against master before fixing: four
+    /// constructs from a real MCP catalog that jcode marked `strict: true` and
+    /// OpenAI then rejected, failing the entire tool catalog.
+    ///
+    /// Each is legal JSON Schema that Anthropic accepts, so the fix is to fail
+    /// strict eligibility closed rather than to rewrite the schema.
+    #[test]
+    fn issue_711_constructs_openai_rejects_do_not_claim_strict() {
+        let cases: &[(&str, serde_json::Value)] = &[
+            (
+                // mcp__cirqul__correct_memory: a branch that only adds a
+                // constraint cannot satisfy strict object requirements.
+                "constraint-only anyOf branch",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "memory_id": { "type": "string" } },
+                    "anyOf": [ { "required": ["memory_id"] } ]
+                }),
+            ),
+            (
+                // mcp__cirqul__create_object: OpenAI wants a `type` key on a
+                // branch even when an enum already pins the values.
+                "enum-only anyOf branch without a type",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "anyOf": [ { "enum": ["a", "b"] }, { "type": "string" } ] }
+                    }
+                }),
+            ),
+            (
+                "array with unconstrained items",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "tags": { "type": "array" } }
+                }),
+            ),
+            (
+                // `$defs` is stripped on some paths, so a surviving `$ref`
+                // cannot be resolved by the validator.
+                "unresolvable $ref",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "node": { "$ref": "#/$defs/missing" } }
+                }),
+            ),
+        ];
+
+        for (label, schema) in cases {
+            assert!(
+                !schema_supports_strict(&openai_compatible_schema(schema)),
+                "{label} must not be sent as a strict schema"
+            );
+        }
+    }
+
+    /// Failing closed must not become failing always: every construct below is
+    /// well formed, and losing strict mode for them would quietly drop the
+    /// structured-output guarantees on every OpenAI-route tool call.
+    #[test]
+    fn well_formed_schemas_keep_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "where" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "mode": { "enum": ["fast", "slow"] },
+                "either": { "anyOf": [ { "type": "string" }, { "type": "integer" } ] },
+                "nested": { "type": "object", "properties": { "x": { "type": "boolean" } } }
+            },
+            "required": ["path"]
+        });
+        assert!(
+            schema_supports_strict(&openai_compatible_schema(&schema)),
+            "a well-formed schema must keep strict mode"
+        );
     }
 }

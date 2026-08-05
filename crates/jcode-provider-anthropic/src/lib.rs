@@ -299,6 +299,14 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
 /// definitions in OAuth mode. These keep their hand-tuned schemas/descriptions
 /// (which the Anthropic subscription endpoint expects) instead of the raw
 /// registry definitions; every other tool is forwarded as-is (see #409).
+/// Local tool names that already have a hand-tuned curated OAuth definition
+/// above, so the registry pass must not forward them a second time.
+///
+/// `schedule` is deliberately absent: its curated `ScheduleWakeup` schema had
+/// drifted from the real tool (it advertised `delaySeconds`/`reason`/`prompt`
+/// while the handler requires `task` + `wake_in_minutes`/`wake_at`), so every
+/// call failed with "task is required for action=create" (#706). Forwarding the
+/// real schema under the remapped name keeps the two in sync by construction.
 const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "subagent",
     "bash",
@@ -306,77 +314,23 @@ const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "read",
-    "schedule",
     "skill_manage",
     "write",
 ];
 
-/// Anthropic accepts JSON Schema combinators inside object properties, but
-/// rejects `oneOf`, `anyOf`, and `allOf` at the input schema's top level. Keep
-/// the common object shape and widen top-level variants into one object whose
-/// properties cover every branch. Runtime tool deserialization remains the
-/// authority for action-specific constraints.
+/// Normalize a tool schema for Anthropic's `input_schema`.
+///
+/// Anthropic accepts JSON Schema combinators inside object properties but
+/// rejects `oneOf`/`anyOf`/`allOf` at the top level, and requires an object
+/// schema with a `properties` map. The subset and the rewrites live in
+/// `jcode-schema-dialect` so every provider shares one implementation and one
+/// set of regression tests.
+///
+/// Widening a top-level combiner loses the per-branch constraint, which is
+/// intended: runtime tool deserialization remains the authority on which
+/// combination is actually valid.
 fn anthropic_input_schema(schema: &Value) -> Value {
-    let Value::Object(source) = schema else {
-        return json!({"type": "object", "properties": {}});
-    };
-
-    let mut output = source.clone();
-    let mut merged_properties = output
-        .get("properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut all_of_required = Vec::new();
-
-    for keyword in ["oneOf", "anyOf", "allOf"] {
-        let Some(branches) = output
-            .remove(keyword)
-            .and_then(|value| value.as_array().cloned())
-        else {
-            continue;
-        };
-        for branch in branches {
-            let Some(branch) = branch.as_object() else {
-                continue;
-            };
-            if let Some(properties) = branch.get("properties").and_then(Value::as_object) {
-                for (name, property) in properties {
-                    merged_properties
-                        .entry(name.clone())
-                        .or_insert_with(|| property.clone());
-                }
-            }
-            if keyword == "allOf"
-                && let Some(required) = branch.get("required").and_then(Value::as_array)
-            {
-                for name in required.iter().filter_map(Value::as_str) {
-                    if !all_of_required.iter().any(|existing| existing == name) {
-                        all_of_required.push(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    output.insert("type".to_string(), Value::String("object".to_string()));
-    output.insert("properties".to_string(), Value::Object(merged_properties));
-    if !all_of_required.is_empty() {
-        let required = output
-            .entry("required".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Value::Array(required) = required {
-            for name in all_of_required {
-                if !required
-                    .iter()
-                    .any(|existing| existing.as_str() == Some(&name))
-                {
-                    required.push(Value::String(name));
-                }
-            }
-        }
-    }
-    Value::Object(output)
+    jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::ANTHROPIC)
 }
 
 pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool) -> Vec<ApiTool> {
@@ -412,7 +366,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Bash".to_string(),
                     description: "Executes a given bash command and returns its output."
                         .to_string(),
-                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"}},"required":["command"],"additionalProperties":false}),
+                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"},"justification":{"type":"string","description":"Only when re-issuing a command the destructive gate refused; explain which user request it serves."}},"required":["command"],"additionalProperties":false}),
                     cache_control: None,
                 },
             ),
@@ -449,15 +403,6 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Read".to_string(),
                     description: "Reads a file from the local filesystem.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["schedule"],
-                ApiTool {
-                    name: "ScheduleWakeup".to_string(),
-                    description: "Schedule when to resume work in /loop dynamic mode.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"delaySeconds":{"type":"number"},"reason":{"type":"string"},"prompt":{"type":"string"}},"required":["delaySeconds","reason","prompt"],"additionalProperties":false}),
                     cache_control: None,
                 },
             ),
@@ -1108,7 +1053,7 @@ mod cache_prefix_invariant_tests {
         let formatted = format_tools(&registry, true, false);
         let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
 
-        for ghost in ["Agent", "Glob", "Grep", "ScheduleWakeup", "Skill"] {
+        for ghost in ["Agent", "Glob", "Grep", "Skill"] {
             assert!(
                 !names.contains(&ghost),
                 "advertised ghost builtin {ghost} without a backing registry tool: {names:?}"
@@ -1136,6 +1081,10 @@ mod cache_prefix_invariant_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_tool_schema_tests.rs"]
+mod oauth_tool_schema_tests;
 
 #[cfg(test)]
 #[path = "trailing_assistant_repair_tests.rs"]

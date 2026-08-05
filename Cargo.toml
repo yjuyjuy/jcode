@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.64.2"
+version = "0.68.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -30,6 +30,7 @@ members = [
     "crates/jcode-fuzzy",
     "crates/jcode-harness-api",
     "crates/jcode-harness-api-server",
+    "crates/jcode-sdk",
     "crates/jcode-desktop2",
     "crates/jcode-memory-types",
     "crates/jcode-message-types",
@@ -48,6 +49,7 @@ members = [
     "crates/jcode-provider-metadata",
     "crates/jcode-provider-env",
     "crates/jcode-provider-core",
+    "crates/jcode-schema-dialect",
     "crates/jcode-provider-bedrock",
     "crates/jcode-provider-anthropic",
     "crates/jcode-provider-antigravity",
@@ -70,6 +72,7 @@ members = [
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
+    "crates/jcode-transport",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
@@ -230,6 +233,14 @@ bedrock = ["jcode-tui/bedrock"]
 linux-compat-vendored-openssl = ["jcode-tui/linux-compat-vendored-openssl"]
 mmdr-size-api = ["jcode-tui/mmdr-size-api"]
 pdf = ["jcode-tui/pdf"]
+
+# The harness API bridge ships inside the released binary as `jcode api-bridge`.
+# SDK users must not need a Rust toolchain to reach the API: requiring
+# `cargo run -p jcode-harness-api-server` made the TypeScript SDK unusable for
+# anyone who installed jcode from a release artifact. Unix-only because the
+# bridge listens on a Unix socket.
+[target.'cfg(unix)'.dependencies]
+jcode-harness-api-server = { path = "crates/jcode-harness-api-server" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
@@ -764,6 +775,9 @@ codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"
+# Used by tests/context_window_matrix.rs to assert the shared context-window
+# resolution invariants directly, without going through a live provider.
+jcode-provider-core = { path = "crates/jcode-provider-core" }
 # Enables the downstream test-support helpers (storage::lock_test_env,
 # auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, the
 # ExternalAuthReviewCandidate read accessors) for the root crate's own cli test

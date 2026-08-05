@@ -640,11 +640,12 @@ fn test_diagram_focus_toggle_and_pan() {
     crate::tui::mermaid::clear_active_diagrams();
 }
 
-/// Ctrl+L is the view-only clear: display messages go away, but provider
-/// context, the input draft, and queued messages all survive so the model
-/// still remembers the conversation. (It used to be a deliberate no-op.)
+/// Ctrl+L is a terminal-style clear: a viewport-height blank spacer pushes
+/// the transcript up into scrollback and the view snaps to the bottom, so
+/// the screen looks empty while nothing is deleted. Provider context, the
+/// draft, and the queue are untouched (/cls does the actual view wipe).
 #[test]
-fn test_ctrl_l_clears_view_but_keeps_context() {
+fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Off;
     app.input = "draft message".to_string();
@@ -659,38 +660,99 @@ fn test_ctrl_l_clears_view_but_keeps_context() {
     app.queued_messages.push("queued".to_string());
     app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
     app.bump_display_messages_version();
+    app.scroll_offset = 25;
+    app.auto_scroll_paused = true;
+    crate::tui::ui::set_last_chat_viewport_height(30);
     let session_messages_before = app.session.messages.len();
-    let provider_view_before = app.materialized_provider_messages().len();
-    let session_id_before = app.session.id.clone();
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
         .unwrap();
 
-    assert!(app.display_messages().is_empty(), "view should be cleared");
-    // Local provider context is materialized from session.messages, so the
-    // session transcript surviving means the model keeps its memory.
+    assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
+    assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
     assert_eq!(
-        app.session.messages.len(),
-        session_messages_before,
-        "provider context must survive"
+        app.display_messages().len(),
+        2,
+        "a spacer is appended; the transcript itself is NOT cleared"
     );
-    assert_eq!(
-        app.materialized_provider_messages().len(),
-        provider_view_before,
-        "materialized provider view must survive"
-    );
+    assert_eq!(app.display_messages()[0].content, "visible chat");
+    let spacer = &app.display_messages()[1];
+    assert_eq!(spacer.role, "spacer");
+    assert_eq!(spacer.content, "30", "spacer spans the viewport height");
+    assert_eq!(app.session.messages.len(), session_messages_before);
     assert_eq!(app.input(), "draft message", "input draft must survive");
-    assert_eq!(app.cursor_pos(), "draft message".len());
     assert_eq!(app.queued_messages.len(), 1, "queue must survive");
-    assert_eq!(
-        app.session.id, session_id_before,
-        "Ctrl+L must not start a fresh session (that is /clear)"
-    );
     assert!(!app.diagram_focus);
     assert!(!app.diff_pane_focus);
+
+    // A second Ctrl+L on the already-clear screen must not stack another
+    // blank page.
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(
+        app.display_messages().len(),
+        2,
+        "repeated Ctrl+L does not stack spacers"
+    );
+
+    crate::tui::ui::set_last_chat_viewport_height(0);
 }
 
-/// `/cls` is the slash-command form of the Ctrl+L view-only clear.
+/// The Ctrl+L spacer is a screen-state artifact, not transcript content: as
+/// soon as a real message arrives it is dropped, so no blank block is ever
+/// embedded in the scrollback history.
+#[test]
+fn test_ctrl_l_spacer_dropped_when_new_content_arrives() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::system("old chat".to_string())];
+    app.bump_display_messages_version();
+    crate::tui::ui::set_last_chat_viewport_height(20);
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.display_messages().len(), 2);
+    assert_eq!(app.display_messages()[1].role, "spacer");
+
+    app.push_display_message(DisplayMessage::user("new prompt"));
+
+    let roles: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .map(|m| m.role.as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        vec!["system", "user"],
+        "spacer must be dropped when real content arrives (no blank block in history)"
+    );
+
+    crate::tui::ui::set_last_chat_viewport_height(0);
+}
+
+/// Cmd+L (Super+L, from macOS terminals that forward Command) performs the
+/// same terminal-style clear as Ctrl+L.
+#[test]
+fn test_cmd_l_terminal_clear_matches_ctrl_l() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
+    app.bump_display_messages_version();
+    app.scroll_offset = 12;
+    app.auto_scroll_paused = true;
+    crate::tui::ui::set_last_chat_viewport_height(24);
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::SUPER)
+        .unwrap();
+
+    assert_eq!(app.scroll_offset, 0, "Cmd+L snaps to the bottom");
+    assert!(!app.auto_scroll_paused, "Cmd+L resumes tail-follow");
+    assert_eq!(app.display_messages().len(), 2);
+    assert_eq!(app.display_messages()[1].role, "spacer");
+    assert_eq!(app.display_messages()[1].content, "24");
+
+    crate::tui::ui::set_last_chat_viewport_height(0);
+}
+
+/// `/cls` is the view-only clear: display goes away, context survives.
 #[test]
 fn test_cls_command_clears_view_but_keeps_context() {
     let mut app = create_test_app();

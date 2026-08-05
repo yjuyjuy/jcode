@@ -1831,6 +1831,86 @@ fn anthropic_quality_rank_orders_opus_before_haiku_and_retired_last() {
 }
 
 #[test]
+fn fable_quota_fallback_selects_the_best_available_opus() {
+    let fallback = AnthropicProvider::best_available_opus_model("claude-fable-5")
+        .expect("the curated Anthropic catalog should contain an Opus fallback");
+    assert!(
+        fallback.contains("claude-opus"),
+        "unexpected fallback: {fallback}"
+    );
+
+    let candidates = jcode_base::provider::cached_anthropic_model_ids()
+        .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids);
+    let best_rank = candidates
+        .iter()
+        .filter(|model| model.to_ascii_lowercase().contains("claude-opus"))
+        .filter(|model| !anthropic_model_is_retired(model))
+        .map(|model| anthropic_model_quality_rank(model))
+        .min()
+        .expect("available Opus model");
+    assert_eq!(anthropic_model_quality_rank(&fallback), best_rank);
+}
+
+#[test]
+fn model_scoped_usage_routes_only_exhausted_fable_to_opus() {
+    let usage = jcode_base::usage::UsageData {
+        model_scoped: vec![jcode_base::usage::ModelScopedUsageWindow {
+            model_name: "Fable".to_string(),
+            utilization: 1.0,
+            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
+        }],
+        ..Default::default()
+    };
+    let fallback = AnthropicProvider::fallback_for_model_scoped_usage("claude-fable-5", &usage)
+        .expect("exhausted Fable should route to Opus");
+    assert!(
+        fallback.contains("claude-opus"),
+        "unexpected fallback: {fallback}"
+    );
+    assert!(
+        AnthropicProvider::fallback_for_model_scoped_usage("claude-opus-5", &usage).is_none(),
+        "an exhausted Fable scope must not reroute an explicitly selected Opus"
+    );
+
+    let available = jcode_base::usage::UsageData {
+        model_scoped: vec![jcode_base::usage::ModelScopedUsageWindow {
+            model_name: "Fable".to_string(),
+            utilization: 0.98,
+            resets_at: None,
+        }],
+        ..Default::default()
+    };
+    assert!(
+        AnthropicProvider::fallback_for_model_scoped_usage("claude-fable-5", &available).is_none(),
+        "Fable must remain selected while its scoped quota is available"
+    );
+}
+
+#[test]
+fn detects_live_fable_scoped_limit_errors_without_misrouting_other_limits() {
+    assert!(is_fable_scoped_limit_error(
+        "claude-fable-5",
+        r#"429 {"type":"rate_limit_error","message":"You have reached your weekly Fable limit"}"#,
+    ));
+    assert!(is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "usage limit reached for the 7-day model window",
+    ));
+    assert!(!is_fable_scoped_limit_error(
+        "claude-opus-5",
+        "weekly Fable rate limit reached",
+    ));
+    assert!(!is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "429 overloaded_error: service temporarily overloaded",
+    ));
+    assert!(!is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "global 5-hour rate limit reached",
+    ));
+}
+
+#[test]
 fn ping_keepalive_emits_streaming_phase_event() {
     // Issue #451: during silent reasoning phases, `ping` events can be the
     // only upstream traffic. They must surface as a StreamEvent so the client
