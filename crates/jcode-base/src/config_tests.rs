@@ -707,6 +707,7 @@ fn test_provider_failover_defaults_match_new_behavior() {
         super::CrossProviderFailoverMode::Countdown
     );
     assert!(provider.same_provider_account_failover);
+    assert!(provider.pace_aware_account_balancing);
 }
 
 #[test]
