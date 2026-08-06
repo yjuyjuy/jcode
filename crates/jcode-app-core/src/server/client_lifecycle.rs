@@ -2837,6 +2837,10 @@ async fn append_context_message(
     let _ = client_event_tx.send(event);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "message processing wiring spans session, agent, event channels, terminal env, and swarm state"
+)]
 async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,

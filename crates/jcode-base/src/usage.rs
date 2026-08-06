@@ -9,12 +9,18 @@ mod cache;
 mod display;
 mod model;
 mod openai_helpers;
+mod pace;
 mod provider_fetch;
 pub use accessors::*;
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
 pub use jcode_usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
+pub use pace::{
+    AHEAD_THRESHOLD_PCT, AccountPace, BalanceConfig, BalanceDecision, BalanceState,
+    FIVE_HOUR_PERIOD_SECS, SEVEN_DAY_PERIOD_SECS, WindowPace, compute_window_pace,
+    select_balanced_target, should_prime,
+};
 use provider_fetch::*;
 
 use anyhow::{Context, Result};
