@@ -505,7 +505,15 @@ impl MultiProvider {
         let Some(probe) = account_usage_probe(provider) else {
             return;
         };
-        if !probe.has_multiple_accounts() || !probe.current_exhausted() {
+        if !probe.has_multiple_accounts() {
+            return;
+        }
+        if !probe.current_exhausted() {
+            // Not exhausted: the exhaustion-only failover below has nothing to
+            // do. Try pace-aware same-pace balancing instead (opt-out), which
+            // proactively consumes the soonest-resetting weekly quota first and
+            // primes an unopened 5-hour window when capacity will be needed soon.
+            self.maybe_pace_balance(provider, &probe);
             return;
         }
 
@@ -581,5 +589,176 @@ impl MultiProvider {
 
         let usage = crate::usage::get_sync();
         usage.five_hour >= 0.99 && usage.seven_day >= 0.99
+    }
+
+    /// Pace-aware same-pace balancing for a not-yet-exhausted provider.
+    ///
+    /// Runs only when `[provider].pace_aware_account_balancing` is on. It asks
+    /// the pace model for a same-pace balancing decision (consume the
+    /// soonest-resetting weekly quota first, with hysteresis + a cooldown so it
+    /// never flip-flops); a `Switch` sets the active-account override exactly as
+    /// the exhaustion failover does. When no switch is warranted it considers
+    /// priming an unopened 5-hour window on a peer, but only when more capacity
+    /// will be needed soon (see [`crate::usage::should_prime`]).
+    ///
+    /// This never touches credentials beyond the same override/invalidate path
+    /// the manual `/account switch` and exhaustion failover already use, and
+    /// priming sends only a single minimal inference request.
+    fn maybe_pace_balance(
+        &self,
+        provider: ActiveProvider,
+        probe: &crate::usage::AccountUsageProbe,
+    ) {
+        use std::sync::{LazyLock, Mutex};
+
+        if !crate::config::Config::load()
+            .provider
+            .pace_aware_account_balancing
+        {
+            return;
+        }
+        // Only Anthropic exposes the per-account 5h/7d window data the pace math
+        // needs; OpenAI is handled by the exhaustion path only for now.
+        if provider != ActiveProvider::Claude {
+            return;
+        }
+
+        // Durable-enough cooldown for this process, keyed by provider label.
+        static LAST_SWITCH: LazyLock<Mutex<std::collections::HashMap<&'static str, f64>>> =
+            LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+        let provider_key = Self::provider_label(provider);
+        let now = chrono::Utc::now();
+        let cfg = crate::usage::BalanceConfig::default();
+        let state = crate::usage::BalanceState {
+            last_switch_epoch: LAST_SWITCH
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(provider_key)
+                .copied(),
+        };
+
+        match probe.balanced_decision(cfg, state, now) {
+            crate::usage::BalanceDecision::Switch { to, reason } => {
+                crate::logging::info(&format!(
+                    "{} pace balancing ({}): moving {} -> {}",
+                    probe.provider.display_name(),
+                    reason,
+                    probe.current_label,
+                    to
+                ));
+                self.apply_account_override(provider, &to);
+                LAST_SWITCH
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(provider_key, now.timestamp() as f64);
+                let notice = format!(
+                    "⚡ Pace-balanced {} account: **{}** -> **{}** (consuming soonest-resetting quota first)",
+                    probe.provider.display_name(),
+                    probe.current_label,
+                    to
+                );
+                self.startup_notices
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(notice);
+            }
+            crate::usage::BalanceDecision::Stay(_) | crate::usage::BalanceDecision::Blocked(_) => {
+                // No switch warranted. Consider priming an unopened 5h window so
+                // it is already counting down when the fleet needs it.
+                if let Some(target) = probe.prime_candidate(cfg, now, 10.0) {
+                    self.prime_account(provider, probe, &target);
+                }
+            }
+            // Failover / AllExhausted only arise on an exhausted current account,
+            // which this method is never called for.
+            crate::usage::BalanceDecision::Failover { .. }
+            | crate::usage::BalanceDecision::AllExhausted => {}
+        }
+    }
+
+    /// Point the active-account override at `label` and invalidate the stale
+    /// credential so the next request picks it up. Same mechanism the manual
+    /// switch and exhaustion failover use - never rotates or resets a token.
+    fn apply_account_override(&self, provider: ActiveProvider, label: &str) {
+        match provider {
+            ActiveProvider::Claude => {
+                crate::auth::claude::set_active_account_override(Some(label.to_string()));
+                clear_all_provider_unavailability_for_account();
+                clear_all_model_unavailability_for_account();
+                if let Some(anthropic) = self.anthropic_provider() {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(anthropic.invalidate_credentials())
+                    });
+                }
+            }
+            ActiveProvider::OpenAI => {
+                crate::auth::codex::set_active_account_override(Some(label.to_string()));
+                clear_all_provider_unavailability_for_account();
+                clear_all_model_unavailability_for_account();
+                if let Some(openai) = self.openai_provider() {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(openai.invalidate_credentials())
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Prime a peer account's unopened 5-hour window: temporarily activate it,
+    /// send ONE minimal inference request to start its 5h clock, then restore
+    /// the original active account. Best-effort - any failure is logged and the
+    /// original account is always restored. Sends only a minimal request and
+    /// never touches credentials beyond the override/invalidate path.
+    fn prime_account(
+        &self,
+        provider: ActiveProvider,
+        probe: &crate::usage::AccountUsageProbe,
+        target: &str,
+    ) {
+        if provider != ActiveProvider::Claude {
+            return;
+        }
+        let original = probe.current_label.clone();
+        crate::logging::info(&format!(
+            "{} priming rotating account '{}' 5-hour window (minimal request)",
+            probe.provider.display_name(),
+            target
+        ));
+        self.apply_account_override(provider, target);
+        let result = self.anthropic_provider().map(|anthropic| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    anthropic
+                        .complete_simple("hi", "Reply with a single character.")
+                        .await
+                })
+            })
+        });
+        // Always restore the original active account, whatever happened.
+        self.apply_account_override(provider, &original);
+        match result {
+            Some(Ok(_)) => {
+                let notice = format!(
+                    "⚡ Primed {} account **{}**: opened its 5-hour window so it is ready when needed",
+                    probe.provider.display_name(),
+                    target
+                );
+                self.startup_notices
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(notice);
+            }
+            Some(Err(err)) => {
+                crate::logging::info(&format!(
+                    "{} priming of '{}' did not complete: {}",
+                    probe.provider.display_name(),
+                    target,
+                    err
+                ));
+            }
+            None => {}
+        }
     }
 }

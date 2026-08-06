@@ -274,6 +274,10 @@ pub struct AccountUsageSnapshot {
     pub secondary_label: Option<String>,
     pub seven_day_ratio: Option<f32>,
     pub resets_at: Option<String>,
+    /// The 5-hour window's own reset timestamp, if that window is open.
+    pub five_hour_resets_at: Option<String>,
+    /// The weekly window's own reset timestamp, if reported.
+    pub seven_day_resets_at: Option<String>,
     pub error: Option<String>,
 }
 
@@ -316,6 +320,29 @@ impl AccountUsageSnapshot {
         self.five_hour_ratio
             .unwrap_or(0.0)
             .max(self.seven_day_ratio.unwrap_or(0.0))
+    }
+
+    /// Distill this snapshot into the pace model's `AccountPace`.
+    ///
+    /// An account is treated as never having opened its 5-hour window when it
+    /// reports 0% usage there with no 5-hour reset timestamp - the priming
+    /// case (a fresh account whose 5h clock has never started).
+    pub fn to_account_pace(&self) -> super::pace::AccountPace {
+        let five_hour_window_open = self.five_hour_resets_at.is_some()
+            || self.five_hour_ratio.map(|r| r > 0.0).unwrap_or(false);
+        super::pace::AccountPace {
+            label: self.label.clone(),
+            five_hour_ratio: self.five_hour_ratio,
+            seven_day_ratio: self.seven_day_ratio,
+            resets_at: self
+                .five_hour_resets_at
+                .clone()
+                .or_else(|| self.resets_at.clone()),
+            seven_day_resets_at: self.seven_day_resets_at.clone(),
+            exhausted: self.exhausted,
+            errored: self.error.is_some(),
+            five_hour_window_open,
+        }
     }
 }
 
@@ -373,5 +400,55 @@ impl AccountUsageProbe {
             alternative.summary(),
             self.provider.switch_command(&alternative.label)
         ))
+    }
+
+    /// Distill every account into the pace model's `AccountPace`.
+    pub fn account_paces(&self) -> Vec<super::pace::AccountPace> {
+        self.accounts
+            .iter()
+            .map(AccountUsageSnapshot::to_account_pace)
+            .collect()
+    }
+
+    /// A pace-aware, same-pace balancing decision across the fleet.
+    ///
+    /// Unlike [`best_available_alternative`], this fires even when the current
+    /// account is not yet exhausted: it proactively keeps the fleet on the
+    /// soonest-resetting weekly window (use-it-or-lose-it), with hysteresis and
+    /// a cooldown so it never flip-flops. See [`super::pace::select_balanced_target`].
+    ///
+    /// [`best_available_alternative`]: AccountUsageProbe::best_available_alternative
+    pub fn balanced_decision(
+        &self,
+        cfg: super::pace::BalanceConfig,
+        state: super::pace::BalanceState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> super::pace::BalanceDecision {
+        super::pace::select_balanced_target(
+            &self.current_label,
+            &self.account_paces(),
+            cfg,
+            state,
+            now,
+        )
+    }
+
+    /// The best account to prime (open its 5-hour window) right now, if any.
+    ///
+    /// Returns the label of an unopened-5h-window peer worth priming given the
+    /// active account's current pressure. See [`super::pace::should_prime`].
+    pub fn prime_candidate(
+        &self,
+        cfg: super::pace::BalanceConfig,
+        now: chrono::DateTime<chrono::Utc>,
+        pressure_margin_pct: f64,
+    ) -> Option<String> {
+        let paces = self.account_paces();
+        let active = paces.iter().find(|p| p.label == self.current_label)?;
+        paces
+            .iter()
+            .filter(|cand| cand.label != self.current_label)
+            .find(|cand| super::pace::should_prime(cand, active, cfg, now, pressure_margin_pct))
+            .map(|cand| cand.label.clone())
     }
 }

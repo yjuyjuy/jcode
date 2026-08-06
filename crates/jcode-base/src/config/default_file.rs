@@ -360,6 +360,12 @@ preserve_reasoning_context = true
 # cross_provider_failover = "manual"
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Proactively balance load across same-provider accounts by pace (burn-rate vs
+# remaining window time): consume the soonest-resetting weekly quota first, keep
+# accounts at roughly equal pace, and prime an unopened 5-hour window when more
+# capacity will be needed soon. Default: true. Set false for exhaustion-only
+# switching. Overridable via JCODE_PACE_AWARE_ACCOUNT_BALANCING.
+# pace_aware_account_balancing = false
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests

@@ -294,6 +294,14 @@ pub(super) fn openai_snapshot_from_usage(
                     .as_ref()
                     .and_then(|window| window.resets_at.clone())
             }),
+        five_hour_resets_at: usage
+            .five_hour
+            .as_ref()
+            .and_then(|window| window.resets_at.clone()),
+        seven_day_resets_at: usage
+            .seven_day
+            .as_ref()
+            .and_then(|window| window.resets_at.clone()),
         error: usage.last_error.clone(),
     }
 }
@@ -315,6 +323,8 @@ pub(super) fn anthropic_snapshot_from_usage(
             .five_hour_resets_at
             .clone()
             .or_else(|| usage.seven_day_resets_at.clone()),
+        five_hour_resets_at: usage.five_hour_resets_at.clone(),
+        seven_day_resets_at: usage.seven_day_resets_at.clone(),
         error: usage.last_error.clone(),
     }
 }
