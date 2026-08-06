@@ -1201,6 +1201,13 @@ pub struct ProviderConfig {
     /// Whether jcode should automatically try another account on the same provider
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
+    /// Whether jcode should proactively balance load across same-provider accounts
+    /// by *pace* (burn-rate vs remaining window time), consuming the
+    /// soonest-resetting weekly quota first, instead of only failing over once an
+    /// account is fully exhausted. Includes priming an unopened 5-hour window
+    /// when more capacity will be needed soon. Off leaves the exhaustion-only
+    /// behavior unchanged.
+    pub pace_aware_account_balancing: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1231,6 +1238,7 @@ impl Default for ProviderConfig {
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
+            pace_aware_account_balancing: true,
             copilot_premium: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,

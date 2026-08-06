@@ -272,6 +272,8 @@ fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {
                 secondary_label: None,
                 seven_day_ratio: None,
                 resets_at: None,
+                five_hour_resets_at: None,
+                seven_day_resets_at: None,
                 error: Some(err.to_string()),
             }),
         }
@@ -327,6 +329,8 @@ fn openai_account_usage_probe_sync() -> Option<AccountUsageProbe> {
                 secondary_label: None,
                 seven_day_ratio: None,
                 resets_at: None,
+                five_hour_resets_at: None,
+                seven_day_resets_at: None,
                 error: Some(err.to_string()),
             }),
         }
