@@ -273,37 +273,6 @@ fn update_account_profile_sets_email() {
 }
 
 #[test]
-fn is_max_subscription_pro_is_false() {
-    // This tests the logic directly since we can't mock the file
-    let sub_type = Some("pro".to_string());
-    let is_max = match sub_type {
-        Some(t) => t != "pro",
-        None => true,
-    };
-    assert!(!is_max);
-}
-
-#[test]
-fn is_max_subscription_max_is_true() {
-    let sub_type = Some("max".to_string());
-    let is_max = match sub_type {
-        Some(t) => t != "pro",
-        None => true,
-    };
-    assert!(is_max);
-}
-
-#[test]
-fn is_max_subscription_unknown_is_true() {
-    let sub_type: Option<String> = None;
-    let is_max = match sub_type {
-        Some(t) => t != "pro",
-        None => true,
-    };
-    assert!(is_max);
-}
-
-#[test]
 fn claude_code_credentials_format() {
     let json = r#"{
         "claudeAiOauth": {
