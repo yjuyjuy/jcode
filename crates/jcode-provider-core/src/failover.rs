@@ -122,8 +122,21 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         "no credentials",
         "token exchange failed",
         "authentication failed",
+        "authentication_error",
         "unauthorized",
         "forbidden",
+        // Revoked or otherwise unrecoverable OAuth refresh. These surface with
+        // no bare 401/403 status literal (the refresh endpoint returns an
+        // OAuth `invalid_grant` error and jcode bails with a plain
+        // "...refresh failed: invalid_grant" / "token revoked" message), so
+        // without these needles the error classifies as None and the
+        // same-account failover never fires - the revoked-account stall.
+        "invalid_grant",
+        "token revoked",
+        "token has been revoked",
+        "oauth token has expired",
+        "refresh failed",
+        "refresh token has been revoked",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -178,5 +191,26 @@ mod tests {
             classify_failover_error_message("model version 4130 failed"),
             FailoverDecision::None
         );
+    }
+
+    /// A revoked/invalid OAuth account fails during token refresh, so its error
+    /// carries no bare 401/403 status literal - only an OAuth `invalid_grant`
+    /// or "token revoked"/"refresh failed" phrase. These must still classify as
+    /// a failover so the fleet auto-switches to a healthy account instead of
+    /// dead-ending at the `/poke` stall (jcode-revoked-account-no-failover).
+    #[test]
+    fn classifier_fails_over_on_revoked_oauth_without_status_code() {
+        for message in [
+            "Claude OAuth token is expired and refresh failed: invalid_grant",
+            "OAuth token refresh failed: refresh token has been revoked",
+            "authentication_error: OAuth token revoked",
+            "Automatic Claude OAuth refresh failed: token has been revoked",
+        ] {
+            assert_eq!(
+                classify_failover_error_message(message),
+                FailoverDecision::RetryAndMarkUnavailable,
+                "revoked-account error should fail over: {message}"
+            );
+        }
     }
 }
