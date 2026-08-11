@@ -523,12 +523,105 @@ pub fn get_subscription_type() -> Option<String> {
     load_credentials().ok().and_then(|c| c.subscription_type)
 }
 
-/// Load credentials for the active Anthropic account.
-/// Falls through Claude Code -> jcode accounts -> OpenCode, preferring non-expired tokens.
-pub fn load_credentials() -> Result<ClaudeCredentials> {
-    let now_ms = chrono::Utc::now().timestamp_millis();
+/// Which concrete credential store `load_credentials` resolved the active
+/// Anthropic credential from. This is the identity of the credential that
+/// actually authenticates requests, which is NOT necessarily the jcode account
+/// a user thinks `/account switch` selected: an imported external source
+/// (Claude Code file/env, OpenCode) wins over jcode's own `auth.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeCredentialSource {
+    /// Claude Code's `~/.claude/.credentials.json` file (imported + trusted).
+    ClaudeCodeFile,
+    /// Claude Code's `CLAUDE_CODE_OAUTH_TOKEN` env var (native import trusted).
+    ClaudeCodeEnv,
+    /// jcode's own `~/.jcode/auth.json` numbered accounts.
+    JcodeAccount,
+    /// OpenCode's Anthropic auth (imported + trusted).
+    OpenCode,
+}
 
-    let mut expired_candidates: Vec<(&str, ClaudeCredentials)> = Vec::new();
+impl ClaudeCredentialSource {
+    /// Human-facing name of the source store.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCodeFile => "Claude Code (~/.claude/.credentials.json)",
+            Self::ClaudeCodeEnv => native_source_display_name(),
+            Self::JcodeAccount => "jcode account (~/.jcode/auth.json)",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    /// Whether this is an imported external source rather than jcode's own
+    /// `auth.json`. An external source shadows the numbered jcode accounts,
+    /// which is why `/account switch` can silently do nothing.
+    pub fn is_external(self) -> bool {
+        !matches!(self, Self::JcodeAccount)
+    }
+
+    /// Best-effort on-disk (or env/keychain) location string for the source.
+    pub fn location_hint(self) -> String {
+        let display = |result: Result<PathBuf>| {
+            result
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        };
+        match self {
+            Self::ClaudeCodeFile => display(claude_code_path()),
+            Self::ClaudeCodeEnv => native_source_path_hint().display().to_string(),
+            Self::JcodeAccount => display(jcode_path()),
+            Self::OpenCode => display(opencode_path()),
+        }
+    }
+}
+
+/// A description of the credential source `load_credentials` is currently using,
+/// for surfacing in `/account`, `/usage`, and session-start logs so the active
+/// source is never a silent mystery.
+#[derive(Debug, Clone)]
+pub struct ActiveCredentialSource {
+    pub source: ClaudeCredentialSource,
+    /// On-disk path, env var, or keychain hint the credential came from.
+    pub location: String,
+    /// A short, non-secret prefix of the access token so two sources can be
+    /// told apart without exposing the full token.
+    pub token_prefix: String,
+    /// For `JcodeAccount`, the jcode account label the credential maps to.
+    /// `None` for external sources (they carry no jcode account label).
+    pub account_label: Option<String>,
+    /// Whether the resolved credential is already past its expiry (a refresh
+    /// will be attempted on use).
+    pub expired: bool,
+}
+
+/// Mask an access token down to a short, non-secret identity prefix.
+fn token_identity_prefix(token: &str) -> String {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return "(empty)".to_string();
+    }
+    let visible: String = trimmed.chars().take(12).collect();
+    if trimmed.chars().count() > 12 {
+        format!("{visible}...")
+    } else {
+        visible
+    }
+}
+
+/// Resolve the active Anthropic credential and record which source it came
+/// from. This is the single owner of source priority: Claude Code file, then
+/// Claude Code env token, then jcode accounts, then OpenCode, each preferring a
+/// non-expired token and falling back to the first expired candidate. Both
+/// [`load_credentials`] and [`active_credential_source`] build on it so the
+/// resolution order can never drift between "what authenticates" and "what we
+/// tell the user authenticates".
+fn resolve_active_credential() -> Option<(ClaudeCredentialSource, ClaudeCredentials, bool)> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut expired_candidate: Option<(ClaudeCredentialSource, ClaudeCredentials)> = None;
+    let mut note_expired = |source: ClaudeCredentialSource, creds: ClaudeCredentials| {
+        if expired_candidate.is_none() {
+            expired_candidate = Some((source, creds));
+        }
+    };
 
     if claude_code_path()
         .ok()
@@ -545,9 +638,9 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         && let Ok(creds) = load_claude_code_credentials()
     {
         if creds.expires_at > now_ms {
-            return Ok(creds);
+            return Some((ClaudeCredentialSource::ClaudeCodeFile, creds, false));
         }
-        expired_candidates.push(("claude", creds));
+        note_expired(ClaudeCredentialSource::ClaudeCodeFile, creds);
     }
 
     // Claude Code's `CLAUDE_CODE_OAUTH_TOKEN` env var. Reading the env var is
@@ -560,16 +653,16 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         && let Some(creds) = load_claude_code_env_credentials()
     {
         if creds.expires_at > now_ms {
-            return Ok(creds);
+            return Some((ClaudeCredentialSource::ClaudeCodeEnv, creds, false));
         }
-        expired_candidates.push(("claude-native", creds));
+        note_expired(ClaudeCredentialSource::ClaudeCodeEnv, creds);
     }
 
     if let Ok(creds) = load_jcode_credentials() {
         if creds.expires_at > now_ms {
-            return Ok(creds);
+            return Some((ClaudeCredentialSource::JcodeAccount, creds, false));
         }
-        expired_candidates.push(("jcode", creds));
+        note_expired(ClaudeCredentialSource::JcodeAccount, creds);
     }
 
     if opencode_path()
@@ -587,16 +680,96 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         && let Ok(creds) = load_opencode_credentials()
     {
         if creds.expires_at > now_ms {
-            return Ok(creds);
+            return Some((ClaudeCredentialSource::OpenCode, creds, false));
         }
-        expired_candidates.push(("opencode", creds));
+        note_expired(ClaudeCredentialSource::OpenCode, creds);
     }
 
-    if let Some((_source, creds)) = expired_candidates.into_iter().next() {
-        return Ok(creds);
-    }
+    expired_candidate.map(|(source, creds)| (source, creds, true))
+}
 
-    anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)")
+/// Load credentials for the active Anthropic account.
+/// Falls through Claude Code -> jcode accounts -> OpenCode, preferring non-expired tokens.
+pub fn load_credentials() -> Result<ClaudeCredentials> {
+    match resolve_active_credential() {
+        Some((_source, creds, _expired)) => Ok(creds),
+        None => {
+            anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)")
+        }
+    }
+}
+
+/// Describe the credential source `load_credentials` is currently resolving to,
+/// for user-facing surfaces. `None` when no Anthropic credential is configured.
+pub fn active_credential_source() -> Option<ActiveCredentialSource> {
+    let (source, creds, expired) = resolve_active_credential()?;
+    let account_label = if source == ClaudeCredentialSource::JcodeAccount {
+        active_account_label()
+    } else {
+        None
+    };
+    Some(ActiveCredentialSource {
+        source,
+        location: source.location_hint(),
+        token_prefix: token_identity_prefix(&creds.access_token),
+        account_label,
+        expired,
+    })
+}
+
+/// When an imported external source currently wins credential resolution while
+/// jcode's own `auth.json` has configured accounts that are therefore never
+/// reached, return that shadowing external source. This is the exact condition
+/// that makes `/account switch` a silent dead control: it only edits auth.json,
+/// which sits below the external import. `None` when jcode's own accounts are
+/// the active source, or when no auth.json accounts exist to be shadowed.
+pub fn external_import_shadowing_accounts() -> Option<ClaudeCredentialSource> {
+    let active = active_credential_source()?;
+    if !active.source.is_external() {
+        return None;
+    }
+    let has_jcode_accounts = load_auth_file()
+        .map(|auth| !auth.anthropic_accounts.is_empty())
+        .unwrap_or(false);
+    has_jcode_accounts.then_some(active.source)
+}
+
+static ACTIVE_SOURCE_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Log which Anthropic credential source is actually in use, once per process,
+/// so a session's logs record the resolved source (location, token prefix, and
+/// mapped jcode account label) and loudly flag when an external import is
+/// shadowing the configured auth.json accounts. Idempotent: only the first call
+/// emits, so repeated auth-status probes do not spam the log.
+pub fn log_active_credential_source_once() {
+    if ACTIVE_SOURCE_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(active) = active_credential_source() else {
+        crate::logging::info("Active Claude credential: none configured");
+        return;
+    };
+    let account = active
+        .account_label
+        .as_ref()
+        .map(|label| format!(", account {label}"))
+        .unwrap_or_default();
+    let expired = if active.expired { ", expired" } else { "" };
+    crate::logging::info(&format!(
+        "Active Claude credential: {} at {} [{}]{}{}",
+        active.source.display_name(),
+        active.location,
+        active.token_prefix,
+        account,
+        expired,
+    ));
+    if let Some(shadow) = external_import_shadowing_accounts() {
+        crate::logging::warn(&format!(
+            "Active Claude credential comes from {}, which shadows your jcode auth.json accounts. `/account switch` only edits auth.json and will NOT change the live credential until this import is cleared.",
+            shadow.display_name(),
+        ));
+    }
 }
 
 /// Load credentials for a specific jcode account by label.
