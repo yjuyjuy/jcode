@@ -448,10 +448,10 @@ fn account_matches_priority_entry(account: &AccountPace, entry: &str) -> bool {
     if entry.is_empty() {
         return false;
     }
-    if let Some(email) = account.email.as_deref() {
-        if email.eq_ignore_ascii_case(entry) {
-            return true;
-        }
+    if let Some(email) = account.email.as_deref()
+        && email.eq_ignore_ascii_case(entry)
+    {
+        return true;
     }
     account.label == entry
 }
