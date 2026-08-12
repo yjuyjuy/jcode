@@ -36,6 +36,7 @@ mod headless;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
+mod message_nonce_dedup;
 mod provider_control;
 mod reload;
 mod reload_recovery;

@@ -137,6 +137,10 @@ struct PendingRemoteMessage {
     auto_retry: bool,
     retry_attempts: u8,
     retry_at: Option<Instant>,
+    /// Stable idempotency key for this logical submission, generated once and
+    /// preserved across every busy/disconnect re-send of the same content so the
+    /// server can deduplicate a re-appended user turn (issue #391 amplifier).
+    submission_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1546,6 +1550,14 @@ pub struct App {
     rate_limit_reset: Option<Instant>,
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
+    // Idempotency carry-over for the busy-recovery amplifier: when a busy
+    // rejection re-queues an in-flight submission (issue #391 recovery), the
+    // pending message is dropped and only its content string survives in the
+    // queue. Stash `(content, submission_nonce)` here so the immediate re-send
+    // of that same content reuses the original nonce and the server deduplicates
+    // the re-appended user turn instead of duplicating it. Cleared once reused or
+    // on turn completion.
+    busy_recovered_submission: Option<(String, String)>,
     // Consecutive turn errors that classify as credential/auth failures.
     // Reset on turn success or auth change; drives the credential-failure
     // circuit breaker that halts automatic resends (see

@@ -356,6 +356,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        submission_nonce: None,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;

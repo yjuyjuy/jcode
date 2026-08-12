@@ -111,6 +111,7 @@ struct ProcessingMessage {
     content: String,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
+    submission_nonce: Option<String>,
 }
 
 struct ProcessingState<'a> {
@@ -484,6 +485,10 @@ pub(super) async fn handle_client(
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
+    // Per-connection idempotency for inbound user submissions: a duplicate
+    // `submission_nonce` (re-sent by the client's busy-recovery loop) is
+    // acknowledged without appending a second identical user turn.
+    let mut message_nonce_tracker = super::message_nonce_dedup::MessageNonceTracker::new();
     let mut current_client_instance_id: Option<String> = None;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -1106,6 +1111,7 @@ pub(super) async fn handle_client(
                 images,
                 system_reminder,
                 no_reply,
+                submission_nonce,
             } => {
                 if no_reply {
                     append_context_message(
@@ -1118,6 +1124,20 @@ pub(super) async fn handle_client(
                         &client_event_tx,
                     )
                     .await;
+                    continue;
+                }
+                // Idempotency guard: a submission whose nonce we already accepted
+                // is a client busy/disconnect re-send of the same logical turn
+                // (issue #391 recovery amplified into duplicate user turns).
+                // Acknowledge it as done without appending a second identical
+                // user turn or running the model again. Nonce-less submissions
+                // (older clients) are never deduplicated.
+                if message_nonce_tracker.is_duplicate(submission_nonce.as_deref()) {
+                    crate::logging::info(&format!(
+                        "Deduplicating re-sent message id={} session={} (submission_nonce already accepted)",
+                        id, client_session_id
+                    ));
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
                     continue;
                 }
                 if !client_is_processing {
@@ -1133,6 +1153,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         system_reminder,
+                        submission_nonce,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1141,6 +1162,7 @@ pub(super) async fn handle_client(
                         session_id: &mut processing_session_id,
                         task: &mut processing_task,
                     },
+                    &mut message_nonce_tracker,
                     &agent,
                     &client_event_tx,
                     &processing_done_tx,
@@ -2845,6 +2867,7 @@ async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,
     state: &mut ProcessingState<'_>,
+    message_nonce_tracker: &mut super::message_nonce_dedup::MessageNonceTracker,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
@@ -2856,6 +2879,7 @@ async fn start_processing_message(
         content,
         images,
         system_reminder,
+        submission_nonce,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -2874,6 +2898,11 @@ async fn start_processing_message(
         });
         return;
     }
+
+    // The submission is now accepted (past the reload and busy gates and about
+    // to append + run). Record its nonce so any later busy/disconnect re-send of
+    // the same logical submission is short-circuited as a duplicate.
+    message_nonce_tracker.record(submission_nonce.as_deref());
 
     *state.client_is_processing = true;
     *state.message_id = Some(id);

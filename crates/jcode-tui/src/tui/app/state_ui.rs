@@ -273,6 +273,7 @@ impl App {
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,
+                            "submission_nonce": pending.submission_nonce,
                         })
                     })
                 };
@@ -500,6 +501,10 @@ impl App {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u8,
                     retry_at: None,
+                    submission_nonce: pending
+                        .get("submission_nonce")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")
