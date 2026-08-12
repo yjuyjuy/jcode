@@ -8,6 +8,7 @@ fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
 fn account(label: &str) -> AccountPace {
     AccountPace {
         label: label.to_string(),
+        email: None,
         five_hour_ratio: Some(0.0),
         seven_day_ratio: Some(0.0),
         resets_at: None,
@@ -430,6 +431,7 @@ fn real_fleet(now: DateTime<Utc>) -> Vec<AccountPace> {
     vec![
         AccountPace {
             label: "claude-2".to_string(),
+            email: Some("cyuan@example.com".to_string()),
             five_hour_ratio: Some(0.13),
             seven_day_ratio: Some(0.65),
             resets_at: Some((now + Duration::hours(2) + Duration::minutes(47)).to_rfc3339()),
@@ -440,6 +442,7 @@ fn real_fleet(now: DateTime<Utc>) -> Vec<AccountPace> {
         },
         AccountPace {
             label: "claude-1".to_string(),
+            email: Some("dev1@example.com".to_string()),
             five_hour_ratio: Some(0.0),
             seven_day_ratio: Some(0.86),
             resets_at: None,
@@ -450,6 +453,7 @@ fn real_fleet(now: DateTime<Utc>) -> Vec<AccountPace> {
         },
         AccountPace {
             label: "claude-3".to_string(),
+            email: Some("dev3@example.com".to_string()),
             five_hour_ratio: Some(0.0),
             seven_day_ratio: Some(0.0),
             resets_at: None,
@@ -460,6 +464,7 @@ fn real_fleet(now: DateTime<Utc>) -> Vec<AccountPace> {
         },
         AccountPace {
             label: "claude-4".to_string(),
+            email: Some("dev4@example.com".to_string()),
             five_hour_ratio: None,
             seven_day_ratio: None,
             resets_at: None,
@@ -538,4 +543,269 @@ fn real_fleet_prime_candidate_selects_never_opened_account() {
     // prime; the first unopened peer wins.
     let target = target.expect("a prime candidate under pressure");
     assert!(target == "claude-1" || target == "claude-3", "got {target}");
+}
+
+// ── priority strategy ─────────────────────────────────────────────────────────
+
+fn priority_account(label: &str, email: &str, binding_pct: f64, exhausted: bool) -> AccountPace {
+    AccountPace {
+        label: label.to_string(),
+        email: Some(email.to_string()),
+        five_hour_ratio: Some((binding_pct / 100.0) as f32),
+        seven_day_ratio: Some(0.0),
+        resets_at: None,
+        seven_day_resets_at: None,
+        exhausted,
+        errored: false,
+        five_hour_window_open: true,
+    }
+}
+
+// primary@ ranked first, backup@ second. Positional labels are deliberately
+// "reversed" (claude-1 is the backup, claude-2 is the primary) to prove the
+// selector keys on email, not on the claude-N number.
+fn priority_fleet(primary_binding: f64, backup_binding: f64) -> Vec<AccountPace> {
+    vec![
+        priority_account("claude-2", "primary@example.com", primary_binding, false),
+        priority_account("claude-1", "backup@example.com", backup_binding, false),
+    ]
+}
+
+fn priority_order() -> Vec<String> {
+    vec![
+        "primary@example.com".to_string(),
+        "backup@example.com".to_string(),
+    ]
+}
+
+#[test]
+fn priority_stays_on_highest_when_current_and_healthy() {
+    let now = utc(2026, 8, 6, 5, 20);
+    let fleet = priority_fleet(20.0, 10.0);
+    let decision = select_priority_target(
+        "claude-2", // primary@, highest priority, healthy
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(decision, BalanceDecision::Stay("priority-current-preferred"));
+}
+
+#[test]
+fn priority_falls_back_when_current_capped() {
+    let now = utc(2026, 8, 6, 5, 20);
+    // primary@ at 90% (>= capped 85), backup@ healthy at 10%.
+    let fleet = priority_fleet(90.0, 10.0);
+    let decision = select_priority_target(
+        "claude-2",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(
+        decision,
+        BalanceDecision::Switch {
+            to: "claude-1".to_string(),
+            reason: "priority-cap"
+        }
+    );
+}
+
+#[test]
+fn priority_returns_to_higher_after_reset() {
+    let now = utc(2026, 8, 6, 5, 20);
+    // Currently on backup@ (claude-1); primary@ (claude-2) has reset to 5%, well
+    // below the return ceiling (85 - 10 = 75), so return up to it.
+    let fleet = priority_fleet(5.0, 40.0);
+    let decision = select_priority_target(
+        "claude-1", // backup@ currently active
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(
+        decision,
+        BalanceDecision::Switch {
+            to: "claude-2".to_string(),
+            reason: "priority-return"
+        }
+    );
+}
+
+#[test]
+fn priority_does_not_flap_back_when_higher_hovers_at_cap() {
+    let now = utc(2026, 8, 6, 5, 20);
+    // On backup@; primary@ just barely reset to 80% - above the return ceiling
+    // (75), so the asymmetric hysteresis keeps us on backup@ rather than
+    // ping-ponging back to a primary that is still nearly capped.
+    let fleet = priority_fleet(80.0, 40.0);
+    let decision = select_priority_target(
+        "claude-1",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(decision, BalanceDecision::Stay("priority-current-preferred"));
+}
+
+#[test]
+fn priority_keys_on_email_not_positional_label() {
+    let now = utc(2026, 8, 6, 5, 20);
+    // Same fleet, but the priority order is expressed by email. claude-2 carries
+    // primary@ and is highest priority even though its positional number is
+    // higher than claude-1's. On claude-1 (backup@) with primary@ healthy, we
+    // return up to claude-2.
+    let fleet = priority_fleet(5.0, 5.0);
+    let decision = select_priority_target(
+        "claude-1",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(
+        decision,
+        BalanceDecision::Switch {
+            to: "claude-2".to_string(),
+            reason: "priority-return"
+        }
+    );
+}
+
+#[test]
+fn priority_failover_when_current_exhausted() {
+    let now = utc(2026, 8, 6, 5, 20);
+    let mut fleet = priority_fleet(100.0, 10.0);
+    fleet[0].exhausted = true; // primary@ dead
+    let decision = select_priority_target(
+        "claude-2",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(
+        decision,
+        BalanceDecision::Failover {
+            to: "claude-1".to_string()
+        }
+    );
+}
+
+#[test]
+fn priority_all_exhausted_reported() {
+    let now = utc(2026, 8, 6, 5, 20);
+    let mut fleet = priority_fleet(100.0, 100.0);
+    fleet[0].exhausted = true;
+    fleet[1].exhausted = true;
+    let decision = select_priority_target(
+        "claude-2",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(decision, BalanceDecision::AllExhausted);
+}
+
+#[test]
+fn priority_cooldown_blocks_non_failover_switch() {
+    let now = utc(2026, 8, 6, 5, 20);
+    // Current capped, but a switch happened 60s ago (< 300s cooldown): hold.
+    let fleet = priority_fleet(90.0, 10.0);
+    let state = BalanceState {
+        last_switch_epoch: Some((now.timestamp() - 60) as f64),
+    };
+    let decision = select_priority_target(
+        "claude-2",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        state,
+        now,
+    );
+    assert_eq!(decision, BalanceDecision::Stay("cooldown"));
+}
+
+#[test]
+fn priority_cooldown_never_blocks_exhausted_failover() {
+    let now = utc(2026, 8, 6, 5, 20);
+    let mut fleet = priority_fleet(100.0, 10.0);
+    fleet[0].exhausted = true;
+    let state = BalanceState {
+        last_switch_epoch: Some((now.timestamp() - 10) as f64),
+    };
+    let decision = select_priority_target(
+        "claude-2",
+        &fleet,
+        &priority_order(),
+        BalanceConfig::default(),
+        state,
+        now,
+    );
+    assert_eq!(
+        decision,
+        BalanceDecision::Failover {
+            to: "claude-1".to_string()
+        }
+    );
+}
+
+#[test]
+fn priority_unlisted_account_is_last_resort() {
+    let now = utc(2026, 8, 6, 5, 20);
+    // Only backup@ is listed; the current account is unlisted (rank last). Since
+    // a listed account always outranks an unlisted one, backup@ is "higher
+    // priority" than the current account, so the selector returns up to it - even
+    // though the current unlisted account also happens to be capped. Either way
+    // the target is the listed backup@: an unlisted account is never preferred
+    // over a listed one.
+    let fleet = vec![
+        priority_account("claude-9", "unlisted@example.com", 90.0, false),
+        priority_account("claude-1", "backup@example.com", 10.0, false),
+    ];
+    let order = vec!["backup@example.com".to_string()];
+    let decision = select_priority_target(
+        "claude-9",
+        &fleet,
+        &order,
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    assert_eq!(
+        decision,
+        BalanceDecision::Switch {
+            to: "claude-1".to_string(),
+            reason: "priority-return"
+        }
+    );
+}
+
+#[test]
+fn priority_empty_order_stays_on_current_when_healthy() {
+    let now = utc(2026, 8, 6, 5, 20);
+    let fleet = priority_fleet(20.0, 10.0);
+    let decision = select_priority_target(
+        "claude-2",
+        &fleet,
+        &[],
+        BalanceConfig::default(),
+        BalanceState::default(),
+        now,
+    );
+    // With no ranking, both accounts tie at rank usize::MAX; current healthy =>
+    // stay. (The startup wiring also guards against an empty list before calling.)
+    assert_eq!(decision, BalanceDecision::Stay("priority-current-preferred"));
 }
