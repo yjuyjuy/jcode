@@ -2174,6 +2174,14 @@ impl Provider for MultiProvider {
         }
     }
 
+    async fn reselect_account(&self) {
+        // Poll-driven, cooldown-gated selection against current usage. Reuses the
+        // same strategy dispatch (pace / priority / exhaustion-only) as startup,
+        // and invalidates cached credentials on a switch, so the next request
+        // uses the newly selected account.
+        self.reevaluate_account_selection();
+    }
+
     fn handles_tools_internally(&self) -> bool {
         match self.active_provider() {
             ActiveProvider::Claude => {

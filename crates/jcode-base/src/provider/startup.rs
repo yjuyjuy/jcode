@@ -1,5 +1,61 @@
 use super::*;
 
+/// Minimum seconds between poll-driven account re-evaluations.
+///
+/// Defaults to 60 seconds; overridable via `JCODE_ACCOUNT_REEVAL_INTERVAL_SECS`.
+/// `0` disables poll-driven re-evaluation entirely. A malformed value falls back
+/// to the default.
+fn account_reeval_interval_secs() -> u64 {
+    parse_account_reeval_interval(std::env::var("JCODE_ACCOUNT_REEVAL_INTERVAL_SECS").ok().as_deref())
+}
+
+/// Default poll-driven re-evaluation interval, in seconds.
+const DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS: u64 = 60;
+
+/// Pure parse of the re-eval interval override. `None` (unset) and a malformed
+/// value both fall back to [`DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS`]; a valid
+/// non-negative integer (including `0`, which disables) is honored.
+fn parse_account_reeval_interval(raw: Option<&str>) -> u64 {
+    match raw {
+        Some(value) => value
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS),
+        None => DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS,
+    }
+}
+
+#[cfg(test)]
+mod reeval_interval_tests {
+    use super::{parse_account_reeval_interval, DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS};
+
+    #[test]
+    fn unset_uses_default() {
+        assert_eq!(
+            parse_account_reeval_interval(None),
+            DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn malformed_uses_default() {
+        assert_eq!(
+            parse_account_reeval_interval(Some("not-a-number")),
+            DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn zero_disables() {
+        assert_eq!(parse_account_reeval_interval(Some("0")), 0);
+    }
+
+    #[test]
+    fn valid_value_is_honored() {
+        assert_eq!(parse_account_reeval_interval(Some("  120  ")), 120);
+    }
+}
+
 impl MultiProvider {
     pub(super) fn spawn_post_auth_model_refresh(
         &self,
@@ -480,6 +536,45 @@ impl MultiProvider {
 
     pub fn auto_select_active_multi_account(&self) {
         self.auto_select_multi_account_for_provider(self.active_provider());
+    }
+
+    /// Poll-driven account re-evaluation, safe to call at every turn boundary.
+    ///
+    /// Runs the same account-selection logic as [`auto_select_active_multi_account`]
+    /// (so it honors the configured strategy: pace, priority, or exhaustion-only),
+    /// but coarsely time-gates the expensive per-account usage probe so calling it
+    /// once per turn never adds per-turn latency. This is what makes a priority
+    /// strategy's "return on reset" and "fall back on cap", and pace balancing's
+    /// ongoing rebalance, actually fire AFTER startup instead of only at provider
+    /// construction and explicit provider switch.
+    ///
+    /// The re-evaluation interval defaults to 60 seconds and is overridable via
+    /// `JCODE_ACCOUNT_REEVAL_INTERVAL_SECS`. A value of `0` disables the poll-driven
+    /// re-evaluation entirely (falling back to construction-time and explicit-switch
+    /// selection only).
+    pub fn reevaluate_account_selection(&self) {
+        use std::sync::{LazyLock, Mutex};
+
+        let interval_secs = account_reeval_interval_secs();
+        if interval_secs == 0 {
+            return;
+        }
+
+        static LAST_REEVAL: LazyLock<Mutex<Option<f64>>> = LazyLock::new(|| Mutex::new(None));
+        let now = chrono::Utc::now().timestamp() as f64;
+        {
+            let mut last = LAST_REEVAL
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(prev) = *last
+                && now - prev < interval_secs as f64
+            {
+                return;
+            }
+            *last = Some(now);
+        }
+
+        self.auto_select_active_multi_account();
     }
 
     /// Backward-compatible wrapper for the Anthropic-specific startup rotation entrypoint.

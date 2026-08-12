@@ -220,6 +220,10 @@ impl Provider for JcodeProvider {
         self.inner.invalidate_credentials().await;
     }
 
+    async fn reselect_account(&self) {
+        self.inner.reselect_account().await;
+    }
+
     fn set_premium_mode(&self, mode: copilot::PremiumMode) {
         self.inner.set_premium_mode(mode);
     }
