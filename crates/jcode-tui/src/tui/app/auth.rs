@@ -259,6 +259,24 @@ impl App {
         message.push_str(
             "\nUse /login <provider> to authenticate. /login jcode is for curated jcode subscription access; /account opens the provider/account management center, /account <provider> settings shows provider-specific controls, and /auth doctor or /account <provider> doctor shows recovery steps.",
         );
+        if let Some(active) = crate::auth::claude::active_credential_source() {
+            message.push_str(&format!(
+                "\n\nActive Claude credential: {} [{}]{}",
+                active.source.display_name(),
+                active.token_prefix,
+                active
+                    .account_label
+                    .as_ref()
+                    .map(|label| format!(" (account: {label})"))
+                    .unwrap_or_default(),
+            ));
+            if let Some(shadow) = crate::auth::claude::external_import_shadowing_accounts() {
+                message.push_str(&format!(
+                    "\nWarning: {} is shadowing your jcode auth.json accounts. `/account switch` only edits auth.json, so it will NOT change the active credential while this import is trusted. Run `/logout claude-code` (or clear the trusted import) to fall back to your jcode accounts.",
+                    shadow.display_name(),
+                ));
+            }
+        }
         self.push_display_message(DisplayMessage::system(message));
     }
 
@@ -1034,7 +1052,16 @@ impl App {
                     "Switched to Anthropic account {}.",
                     label
                 )));
-                // Keep account-sensitive UI state in sync immediately.
+                // `/account switch` only edits auth.json. If a trusted external
+                // import (Claude Code / OpenCode) currently wins credential
+                // resolution, that import still authenticates and this switch
+                // has no live effect. Warn instead of silently doing nothing.
+                if let Some(shadow) = crate::auth::claude::external_import_shadowing_accounts() {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Warning: {} is currently the active credential and shadows your jcode auth.json accounts. This switch edited auth.json but will NOT take effect until you clear that import (e.g. /logout claude-code).",
+                        shadow.display_name(),
+                    )));
+                }
                 crate::auth::AuthStatus::invalidate_cache();
                 self.context_limit = self.provider.context_window() as u64;
                 self.context_warning_shown = false;
