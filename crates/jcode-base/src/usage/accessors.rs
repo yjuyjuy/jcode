@@ -173,11 +173,18 @@ pub fn has_extra_usage() -> bool {
 /// Returns an error if the fetch fails (network, auth, etc.).
 /// Results are cached per-account to avoid hammering the API.
 pub fn fetch_usage_for_account_sync(
+    account_label: &str,
     access_token: &str,
     refresh_token: &str,
     expires_at: i64,
 ) -> Result<UsageData> {
-    let cache_key = anthropic_usage_cache_key(access_token, None);
+    // Key by account label so this pace-aware multi-account probe shares the
+    // same cache entries the /usage command and the header widget populate
+    // (both key by `label:<label>`). Keying by `None` produced a
+    // `token:<prefix>` key that never matched, so every rotation tick
+    // live-hit the OAuth usage endpoint for the non-active account and
+    // stormed it into 429s.
+    let cache_key = anthropic_usage_cache_key(access_token, Some(account_label));
 
     if let Some(cached) = cached_anthropic_usage(&cache_key) {
         return Ok(cached);
@@ -189,6 +196,7 @@ pub fn fetch_usage_for_account_sync(
 
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(fetch_usage_for_account(
+            account_label.to_string(),
             access_token.to_string(),
             refresh_token.to_string(),
             expires_at,
@@ -254,7 +262,12 @@ fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {
         let usage = if account.label == current_label && active_cached.fetched_at.is_some() {
             Ok(active_cached.clone())
         } else {
-            fetch_usage_for_account_sync(&account.access, &account.refresh, account.expires)
+            fetch_usage_for_account_sync(
+                &account.label,
+                &account.access,
+                &account.refresh,
+                account.expires,
+            )
         };
 
         match usage {
@@ -344,6 +357,7 @@ fn openai_account_usage_probe_sync() -> Option<AccountUsageProbe> {
 }
 
 async fn fetch_usage_for_account(
+    account_label: String,
     access_token: String,
     _refresh_token: String,
     expires_at: i64,
@@ -353,7 +367,7 @@ async fn fetch_usage_for_account(
         anyhow::bail!("OAuth token expired");
     }
 
-    let cache_key = anthropic_usage_cache_key(&access_token, None);
+    let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
     fetch_anthropic_usage_data(access_token, cache_key).await
 }
 

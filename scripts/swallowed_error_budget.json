@@ -1,9 +1,9 @@
 {
-  "total": 3210,
+  "total": 3213,
   "totals_by_pattern": {
     "dot_ok": 1202,
     "let_underscore": 1194,
-    "unwrap_or_default": 814
+    "unwrap_or_default": 817
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -579,7 +579,7 @@
     "crates/jcode-base/src/auth/claude.rs": {
       "dot_ok": 9,
       "let_underscore": 3,
-      "unwrap_or_default": 0
+      "unwrap_or_default": 1
     },
     "crates/jcode-base/src/auth/codex.rs": {
       "dot_ok": 6,
@@ -1844,7 +1844,7 @@
     "crates/jcode-tui/src/tui/app/auth.rs": {
       "dot_ok": 7,
       "let_underscore": 3,
-      "unwrap_or_default": 12
+      "unwrap_or_default": 13
     },
     "crates/jcode-tui/src/tui/app/auth_account_commands.rs": {
       "dot_ok": 0,
@@ -1974,7 +1974,7 @@
     "crates/jcode-tui/src/tui/app/model_context.rs": {
       "dot_ok": 1,
       "let_underscore": 3,
-      "unwrap_or_default": 6
+      "unwrap_or_default": 7
     },
     "crates/jcode-tui/src/tui/app/navigation.rs": {
       "dot_ok": 0,
