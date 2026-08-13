@@ -1002,6 +1002,10 @@ fn probe_anthropic_status(status: &mut AuthStatus) {
     let mut anthropic = ProviderAuth::default();
 
     if let Ok(creds) = claude::load_credentials() {
+        // First auth probe of the process logs which credential source actually
+        // won resolution, so the session log records the real source (and warns
+        // when an external import is shadowing configured auth.json accounts).
+        claude::log_active_credential_source_once();
         let now_ms = chrono::Utc::now().timestamp_millis();
         anthropic.has_oauth = true;
         if creds.expires_at > now_ms {

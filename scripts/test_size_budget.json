@@ -37,11 +37,11 @@
     "crates/jcode-tui/src/tui/info_widget_tests.rs": 1810,
     "crates/jcode-tui/src/tui/session_picker/loading_tests.rs": 1401,
     "crates/jcode-tui/src/tui/session_picker_tests.rs": 2453,
-    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 3019,
-    "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1285,
+    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 3030,
+    "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1291,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1352,
     "src/cli/commands_tests.rs": 1278,
-    "tests/e2e/test_support/mod.rs": 1425
+    "tests/e2e/test_support/mod.rs": 1426
   },
   "version": 1
 }

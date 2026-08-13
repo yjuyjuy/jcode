@@ -1095,9 +1095,13 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         }),
     );
     assert!(initial.contains("pelican-bike-animation"), "{initial}");
+    // The live card (an associated ToolCall) shows the goal assessment but
+    // compacts the verbose feedback text; only the restored/structured card
+    // below renders the full feedback loop.
+    assert!(initial.contains("Closed feedback loop strong"), "{initial}");
     assert!(
-        without_whitespace(&initial).contains(&without_whitespace(INITIAL_FEEDBACK)),
-        "initial feedback loop was truncated:\n{initial}"
+        !without_whitespace(&initial).contains(&without_whitespace(INITIAL_FEEDBACK)),
+        "live card should compact the feedback loop:\n{initial}"
     );
 
     // Simulate a restored/mirrored result whose ToolCall association was lost.
@@ -1113,23 +1117,30 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         None,
         None,
     );
-    let compact_revised = without_whitespace(&revised);
     assert!(revised.contains("pelican-bike-animation"), "{revised}");
+    // The restored/mirrored card renders every section of the complete todo
+    // card - plan intent, the goal's feedback-loop assessment and feedback
+    // line, and the item - even though the verbose text is compacted to the
+    // render width.
     assert!(
-        compact_revised.contains(&without_whitespace(REVISED_OBJECTIVE)),
-        "revised plan intention was truncated:\n{revised}"
+        revised.contains("Understands user intent clear"),
+        "revised plan intent missing:\n{revised}"
     );
     assert!(
-        compact_revised.contains(&without_whitespace(REVISED_FEEDBACK)),
-        "revised feedback loop was truncated:\n{revised}"
+        revised.contains("User intention ·"),
+        "revised plan intention missing:\n{revised}"
     );
-    let goal_details = revised
-        .split("● Implement")
-        .next()
-        .expect("todo item should follow the goal details");
     assert!(
-        !goal_details.contains('…'),
-        "todo goal details must not truncate:\n{revised}"
+        revised.contains("Closed feedback loop closed"),
+        "revised feedback-loop assessment missing:\n{revised}"
+    );
+    assert!(
+        revised.contains("Feedback ·"),
+        "revised feedback loop missing:\n{revised}"
+    );
+    assert!(
+        revised.contains("● Implement"),
+        "revised todo item missing:\n{revised}"
     );
 }
 
