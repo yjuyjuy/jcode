@@ -382,6 +382,7 @@ impl AccountUsageSnapshot {
             || self.five_hour_ratio.map(|r| r > 0.0).unwrap_or(false);
         super::pace::AccountPace {
             label: self.label.clone(),
+            email: self.email.clone(),
             five_hour_ratio: self.five_hour_ratio,
             seven_day_ratio: self.seven_day_ratio,
             resets_at: self
@@ -477,6 +478,30 @@ impl AccountUsageProbe {
         super::pace::select_balanced_target(
             &self.current_label,
             &self.account_paces(),
+            cfg,
+            state,
+            now,
+        )
+    }
+
+    /// A ranked-priority selection decision across the fleet.
+    ///
+    /// Prefers the highest-priority live account from `priority_order` (matched
+    /// on stable identity - email, then label), falling back down the list when
+    /// the active account is capped or exhausted and returning up the list when a
+    /// higher-priority account is live and comfortably below its cap. See
+    /// [`super::pace::select_priority_target`].
+    pub fn priority_decision(
+        &self,
+        priority_order: &[String],
+        cfg: super::pace::BalanceConfig,
+        state: super::pace::BalanceState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> super::pace::BalanceDecision {
+        super::pace::select_priority_target(
+            &self.current_label,
+            &self.account_paces(),
+            priority_order,
             cfg,
             state,
             now,
