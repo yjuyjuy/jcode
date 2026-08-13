@@ -86,11 +86,13 @@ fn resolve_submission_nonce(app: &mut App, content: &str) -> Option<String> {
     {
         return Some(nonce);
     }
-    if let Some((stashed_content, nonce)) = app.busy_recovered_submission.take() {
-        if stashed_content == content {
-            return Some(nonce);
-        }
-        // The stash was for different content; it no longer applies.
+    // `take()` always clears the one-shot stash; the content check then decides
+    // whether it applied to this submission (a stash for different content is
+    // simply dropped).
+    if let Some((stashed_content, nonce)) = app.busy_recovered_submission.take()
+        && stashed_content == content
+    {
+        return Some(nonce);
     }
     Some(fresh_submission_nonce())
 }
