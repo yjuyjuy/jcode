@@ -46,7 +46,7 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token, cache_key).await {
+    match fetch_anthropic_usage_data(access_token, cache_key, Some(&account_label)).await {
         Ok(data) => provider_report_from_usage_data(display_name, &data),
         Err(e) => ProviderUsage {
             provider_name: display_name,
@@ -129,6 +129,16 @@ pub(super) async fn fetch_openai_usage_for_account(
     let initial_cache_key = openai_usage_cache_key(&creds.access_token, account_label);
     if let Some(cached) = cached_openai_usage(&initial_cache_key) {
         return provider_report_from_openai_usage_data(display_name, &cached);
+    }
+
+    // L2 (host-wide, shared with quota-axi) read-through for the active OpenAI
+    // account. Warms L1 so subsequent reads stay in-process. Non-active probes
+    // (during account switching) skip L2 and fetch directly.
+    if shared_cache::openai_account_is_active(account_label)
+        && let Some(shared) = shared_cache::read_openai()
+    {
+        store_openai_usage(initial_cache_key, shared.clone());
+        return provider_report_from_openai_usage_data(display_name, &shared);
     }
 
     if let Some(expires_at) = creds.expires_at {
@@ -254,7 +264,14 @@ pub(super) async fn fetch_openai_usage_for_account(
         error: None,
         last_used_unix_secs: None,
     };
-    store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+    let openai_data = openai_usage_data_from_provider_report(&report);
+    store_openai_usage(cache_key, openai_data.clone());
+    // L2 write-through: publish the active account's successful usage to the
+    // host-wide shared file. Errors are handled on earlier return paths and are
+    // never written, so 429/backoff state stays owned by L1.
+    if shared_cache::openai_account_is_active(account_label) {
+        shared_cache::write_openai(&openai_data);
+    }
     report
 }
 

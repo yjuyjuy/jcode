@@ -30,7 +30,7 @@ async fn fetch_usage() -> Result<UsageData> {
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&active_label));
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    fetch_anthropic_usage_data(access_token, cache_key, Some(&active_label)).await
 }
 
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
@@ -367,8 +367,12 @@ async fn fetch_usage_for_account(
         anyhow::bail!("OAuth token expired");
     }
 
+    // L1 is keyed per account label (master's 429-storm fix so rotation probes
+    // reuse the /usage and header-widget cache entries instead of live-hitting
+    // the endpoint). This rotation probe may target a non-active account, so L2
+    // is skipped to avoid cross-account contamination; L1 still applies.
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    fetch_anthropic_usage_data(access_token, cache_key, None).await
 }
 
 /// Fetch the current Anthropic OAuth usage for an already-resolved access
@@ -377,7 +381,10 @@ async fn fetch_usage_for_account(
 /// an empty snapshot while a background refresh starts.
 pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageData> {
     let cache_key = anthropic_usage_cache_key(access_token, None);
-    fetch_anthropic_usage_data(access_token.to_string(), cache_key).await
+    // Request-path fetch keyed by raw token with no account label; skip L2 so a
+    // non-active routing token can never read/write the active account's shared
+    // record. L1 keeps this fetch de-duplicated within the session.
+    fetch_anthropic_usage_data(access_token.to_string(), cache_key, None).await
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)
