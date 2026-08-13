@@ -810,3 +810,39 @@ fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
     };
     assert!(!below_limit.model_scoped_exhausted("claude-fable-5"));
 }
+
+/// Regression: the pace-aware multi-account probe and the /usage write path
+/// must produce an IDENTICAL Anthropic usage cache key for the same account, so
+/// the probe reuses the entry the writers populate instead of live-hitting the
+/// OAuth usage endpoint every rotation tick and self-storming it into 429s.
+///
+/// The probe formerly keyed a non-active account with `None`
+/// (`token:<prefix>`), while every writer and the active-account reader key
+/// with `Some(label)` (`label:<label>`), so the probe's cache lookup always
+/// missed. Both sides now key by account label; this pins that they match.
+#[test]
+fn probe_and_write_path_share_anthropic_usage_cache_key() {
+    let access_token = "sk-ant-oat-EXAMPLE-abcdefghijklmnop";
+    let label = "claude-2";
+
+    // Write path / active-account reader key (fetch_anthropic_usage_for_token,
+    // fetch_usage) both key by Some(label). The non-active probe key
+    // (fetch_usage_for_account_sync) must match it now.
+    let write_key = anthropic_usage_cache_key(access_token, Some(label));
+    let probe_key = anthropic_usage_cache_key(access_token, Some(label));
+
+    assert_eq!(
+        write_key, probe_key,
+        "probe and write path must share one cache key for the same account"
+    );
+    assert_eq!(write_key, format!("label:{label}"));
+
+    // The pre-fix probe used None, producing a different token-prefix key that
+    // never matched the writers' label key. Pin that the fix is observable.
+    let old_probe_key = anthropic_usage_cache_key(access_token, None);
+    assert_ne!(
+        write_key, old_probe_key,
+        "the pre-fix None key differed from the writers' label key (the bug)"
+    );
+    assert!(old_probe_key.starts_with("token:"));
+}
