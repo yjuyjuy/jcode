@@ -6,7 +6,11 @@ use super::*;
 /// `0` disables poll-driven re-evaluation entirely. A malformed value falls back
 /// to the default.
 fn account_reeval_interval_secs() -> u64 {
-    parse_account_reeval_interval(std::env::var("JCODE_ACCOUNT_REEVAL_INTERVAL_SECS").ok().as_deref())
+    parse_account_reeval_interval(
+        std::env::var("JCODE_ACCOUNT_REEVAL_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Default poll-driven re-evaluation interval, in seconds.
@@ -27,7 +31,7 @@ fn parse_account_reeval_interval(raw: Option<&str>) -> u64 {
 
 #[cfg(test)]
 mod reeval_interval_tests {
-    use super::{parse_account_reeval_interval, DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS};
+    use super::{DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS, parse_account_reeval_interval};
 
     #[test]
     fn unset_uses_default() {
