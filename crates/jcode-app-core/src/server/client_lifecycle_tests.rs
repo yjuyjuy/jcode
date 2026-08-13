@@ -1468,6 +1468,7 @@ fn duplicate_submission_nonce_appends_exactly_one_user_turn() -> anyhow::Result<
                 content: "run the same submission".to_string(),
                 images: Vec::new(),
                 system_reminder: None,
+                active_skill: None,
                 submission_nonce: Some(nonce.to_string()),
             },
             session_id,
