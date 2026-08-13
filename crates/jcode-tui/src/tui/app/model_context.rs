@@ -1225,6 +1225,25 @@ impl App {
             return lines.join("\n");
         } else {
             lines.push(format!("# Usage updated · {} source(s)", reports.len()));
+            if let Some(active) = crate::auth::claude::active_credential_source() {
+                let account = active
+                    .account_label
+                    .as_ref()
+                    .map(|label| format!(" (account: {label})"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "Active Claude credential: {} [{}]{}",
+                    active.source.display_name(),
+                    active.token_prefix,
+                    account,
+                ));
+                if let Some(shadow) = crate::auth::claude::external_import_shadowing_accounts() {
+                    lines.push(format!(
+                        "! {} is shadowing your jcode auth.json accounts; `/account switch` will not change the active credential until it is cleared.",
+                        shadow.display_name(),
+                    ));
+                }
+            }
             lines.push(String::new());
         }
 
