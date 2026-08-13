@@ -171,6 +171,10 @@ pub fn compute_window_pace(
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountPace {
     pub label: String,
+    /// The account's stable login identity (email), when known. Priority
+    /// selection matches on this rather than the positional `label` so
+    /// relabeling accounts never silently reorders priority.
+    pub email: Option<String>,
     /// 5-hour utilization ratio in `[0.0, 1.0]`, if known.
     pub five_hour_ratio: Option<f32>,
     /// Weekly utilization ratio in `[0.0, 1.0]`, if known.
@@ -253,6 +257,16 @@ pub struct BalanceConfig {
     pub reset_hysteresis_secs: f64,
     /// Minimum seconds between proactive switches.
     pub cooldown_secs: f64,
+    /// Priority strategy: at/over this binding utilization the active account is
+    /// considered "capped" and the priority selector eagerly falls back to a
+    /// lower-priority live account (0..=100).
+    pub priority_capped_pct: f64,
+    /// Priority strategy: asymmetric return hysteresis. A HIGHER-priority account
+    /// is only "returnable" (worth switching back up to) once its binding
+    /// utilization is this many percentage points below `priority_capped_pct`, so
+    /// a primary hovering right at its cap after a reset does not cause the
+    /// selector to flap back and forth (0..=100).
+    pub priority_return_margin_pct: f64,
 }
 
 impl Default for BalanceConfig {
@@ -262,6 +276,8 @@ impl Default for BalanceConfig {
             seven_day_threshold_pct: 80.0,
             reset_hysteresis_secs: 30.0 * 60.0,
             cooldown_secs: 300.0,
+            priority_capped_pct: 85.0,
+            priority_return_margin_pct: 10.0,
         }
     }
 }
@@ -419,6 +435,162 @@ pub fn select_balanced_target(
         },
         None => BalanceDecision::Stay("already-consuming-soonest"),
     }
+}
+
+/// Whether `account` matches priority-order `entry`, keyed on STABLE identity.
+///
+/// An entry matches the account's login email first (case-insensitive), and
+/// falls back to an exact label match only when the account has no email or the
+/// entry is not an email at all. This is why priority is robust to relabeling:
+/// the positional `claude-1`/`claude-2` label is the last resort, not the key.
+fn account_matches_priority_entry(account: &AccountPace, entry: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    if let Some(email) = account.email.as_deref()
+        && email.eq_ignore_ascii_case(entry)
+    {
+        return true;
+    }
+    account.label == entry
+}
+
+/// Whether this account is a live landing target for priority selection: not
+/// exhausted, not errored, and known-usable this round. Usage being unknown is
+/// treated as usable so a fresh, never-probed higher-priority account is not
+/// skipped forever - the priority list is an explicit operator preference.
+fn priority_account_live(account: &AccountPace) -> bool {
+    !account.exhausted && !account.errored
+}
+
+/// The account's binding (worst-window) utilization, or `0.0` when unknown, for
+/// the priority strategy's capped/returnable thresholds. Unknown reads as
+/// wide-open so a never-probed higher-priority account can still be returned to.
+fn priority_binding_pct(account: &AccountPace) -> f64 {
+    account.binding_pct().unwrap_or(0.0)
+}
+
+/// Choose a ranked-priority selection target across the fleet.
+///
+/// Policy (the captain's ranked-list strategy, distinct from consume-first pace
+/// balancing):
+///
+/// * `priority_order` is a ranked list, most-preferred first, matched to
+///   accounts by stable identity (email, then label) via
+///   [`account_matches_priority_entry`]. Accounts not named in the list rank
+///   after every named one, in fleet order, so an unlisted account is a
+///   last-resort landing target rather than invisible.
+/// * The selector prefers the HIGHEST-priority live account. If that account is
+///   already current, it stays. If a higher-priority-than-current account is
+///   live AND "returnable" (its binding utilization is comfortably below the cap
+///   by `priority_return_margin_pct`), it returns up to it. This is how
+///   "return on reset" happens for free: once the primary's window resets it is
+///   live and comfortably below cap, so it wins the next evaluation.
+/// * If the current account is exhausted, or capped (binding utilization at/over
+///   `priority_capped_pct`), the selector falls back to the highest-priority
+///   OTHER live account. An exhausted-current fallback is reported as
+///   `Failover`; a merely-capped one as `Switch { reason: "priority-cap" }`.
+/// * Asymmetric hysteresis: falling back off a capped primary is eager (fires at
+///   the cap), while returning up to a higher-priority account is reluctant (only
+///   once it is `priority_return_margin_pct` below the cap), so a primary
+///   hovering at its cap never ping-pongs.
+/// * Cooldown: no non-failover switch while inside `cooldown_secs` of the last
+///   one. A failover off an exhausted current account ignores the cooldown, the
+///   same way the exhaustion path always has.
+///
+/// `current_label` is the active account; `accounts` is the full fleet including
+/// the active account.
+pub fn select_priority_target(
+    current_label: &str,
+    accounts: &[AccountPace],
+    priority_order: &[String],
+    cfg: BalanceConfig,
+    state: BalanceState,
+    now: DateTime<Utc>,
+) -> BalanceDecision {
+    let Some(current) = accounts.iter().find(|a| a.label == current_label) else {
+        return BalanceDecision::Blocked("current-account-unknown");
+    };
+
+    // Rank the fleet: accounts named in priority_order first (in list order),
+    // then any unlisted account in fleet order. `rank_of` is the sort key.
+    let rank_of = |account: &AccountPace| -> usize {
+        priority_order
+            .iter()
+            .position(|entry| account_matches_priority_entry(account, entry))
+            .unwrap_or(usize::MAX)
+    };
+    let current_rank = rank_of(current);
+
+    // Live landing candidates other than the current account, best rank first.
+    let mut ranked_live: Vec<&AccountPace> = accounts
+        .iter()
+        .filter(|a| a.label != current_label && priority_account_live(a))
+        .collect();
+    ranked_live.sort_by(|a, b| {
+        rank_of(a)
+            .cmp(&rank_of(b))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+
+    let current_exhausted = current.exhausted;
+    let current_capped =
+        current_exhausted || priority_binding_pct(current) >= cfg.priority_capped_pct;
+
+    // -- current account is dead: eager failover, ignores cooldown --------------
+    if current_exhausted {
+        return match ranked_live.first() {
+            Some(target) => BalanceDecision::Failover {
+                to: target.label.clone(),
+            },
+            None => {
+                if accounts.iter().filter(|a| !a.errored).all(|a| a.exhausted) {
+                    BalanceDecision::AllExhausted
+                } else {
+                    BalanceDecision::Blocked("no-live-priority-candidate")
+                }
+            }
+        };
+    }
+
+    if state.in_cooldown(now, cfg.cooldown_secs) {
+        return BalanceDecision::Stay("cooldown");
+    }
+
+    // -- return up to a higher-priority, comfortably-below-cap account ----------
+    // Reluctant: the higher account must be below the cap by the return margin so
+    // a primary hovering at its cap after a reset does not flap.
+    let return_ceiling = (cfg.priority_capped_pct - cfg.priority_return_margin_pct).max(0.0);
+    if let Some(higher) = ranked_live
+        .iter()
+        .filter(|a| rank_of(a) < current_rank)
+        .find(|a| priority_binding_pct(a) < return_ceiling)
+    {
+        return BalanceDecision::Switch {
+            to: higher.label.clone(),
+            reason: "priority-return",
+        };
+    }
+
+    // -- current is capped (but not dead): eager fall back to the best live peer
+    if current_capped {
+        // Prefer a peer that is itself below the cap; otherwise take the best
+        // ranked live peer anyway (any headroom beats a capped current account).
+        let target = ranked_live
+            .iter()
+            .find(|a| priority_binding_pct(a) < cfg.priority_capped_pct)
+            .or_else(|| ranked_live.first());
+        return match target {
+            Some(t) => BalanceDecision::Switch {
+                to: t.label.clone(),
+                reason: "priority-cap",
+            },
+            None => BalanceDecision::Stay("no-live-peer-while-capped"),
+        };
+    }
+
+    BalanceDecision::Stay("priority-current-preferred")
 }
 
 fn future_seven_day_reset(account: &AccountPace, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
