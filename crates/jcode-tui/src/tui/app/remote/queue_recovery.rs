@@ -143,6 +143,16 @@ pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &st
         return false;
     };
     app.rate_limit_reset = None;
+    // Preserve this submission's idempotency nonce across the re-queue hop. The
+    // pending message is dropped here and only its content survives in the
+    // queue, so stash (content, nonce) for the immediate re-send to reuse. This
+    // is what lets the server deduplicate the re-appended user turn instead of
+    // duplicating it (the busy-recovery amplifier, issue #391).
+    if let Some(nonce) = pending.submission_nonce.clone()
+        && !pending.content.trim().is_empty()
+    {
+        app.busy_recovered_submission = Some((pending.content.clone(), nonce));
+    }
     crate::logging::info(&format!(
         "Recovering in-flight queued continuation into queued follow-ups after {} (content_chars={}, has_reminder={})",
         reason,
