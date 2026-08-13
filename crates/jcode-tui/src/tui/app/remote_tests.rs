@@ -114,11 +114,16 @@ fn idle_donut_pauses_while_unfocused() {
         "idle animation must pause while the terminal is unfocused"
     );
 
-    // Regaining focus requests a full repaint so the window is not stuck on the
-    // last paused frame.
+    // Regaining focus requests a differential redraw so the window catches up
+    // without clearing and retransmitting every terminal cell.
+    app.force_full_redraw = false;
     let redraw = app.set_client_focused(true);
     assert!(redraw, "regaining focus should request a redraw");
     assert!(app.client_focused());
+    assert!(
+        !app.force_full_redraw,
+        "focus changes must not force an expensive full-terminal repaint"
+    );
 }
 
 #[test]
@@ -558,6 +563,36 @@ fn process_remote_followups_auto_submits_staged_startup_prompt() {
             .any(|message| message.role == "user"
                 && message.content == "Classify the issues in /tmp/batch.txt"),
         "submitting the startup prompt should record it as a user message"
+    );
+}
+
+#[test]
+fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.input = "Start the fork immediately".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input_on_startup = true;
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(!remote.has_loaded_history());
+
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+    assert!(!app.submit_input_on_startup);
+    assert!(app.input.is_empty());
+    assert!(
+        app.is_processing,
+        "the ordered startup request should start immediately"
+    );
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user"),
+        "the local user echo must wait for the server Transcript behind History"
     );
 }
 

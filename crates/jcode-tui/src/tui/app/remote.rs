@@ -64,6 +64,22 @@ pub(super) use server_events::handle_server_event;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+
+fn handle_ctrl_kill_to_end(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    // Match the local draft semantics before remote navigation can claim Ctrl+K.
+    // Ctrl+Shift+K remains reserved for scrolling.
+    if modifiers.contains(KeyModifiers::CONTROL)
+        && !modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(code, KeyCode::Char('k'))
+        && !app.input.is_empty()
+    {
+        input::delete_input_to_end(app);
+        return true;
+    }
+
+    false
+}
+
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
@@ -304,6 +320,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     detect_and_cancel_stall(app, remote).await;
     needs_redraw |= recover_stuck_remote_history(app, remote).await;
     needs_redraw |= detect_starved_queued_followup(app);
+    needs_redraw |= app.maybe_finish_background_client_reload();
     needs_redraw
 }
 
@@ -1181,6 +1198,55 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
+    // A headed fork stages its first prompt before launching the new client. We
+    // can send that prompt immediately after Subscribe, without waiting for the
+    // client to receive and render History: requests and events share one
+    // ordered socket, so the server finishes writing the Subscribe History
+    // response before it reads this Message request. Do not echo the user turn
+    // locally here because the still-in-flight History payload would clear it;
+    // the server's ordered Transcript event will add it immediately afterwards.
+    //
+    // This removes the visible, intermittent pause between the fork window
+    // opening and its prompt starting, which was proportional to history payload
+    // transfer/render time for large parent sessions.
+    if !remote.has_loaded_history()
+        && app.submit_input_on_startup
+        && !app.is_processing
+        && !app.remote_model_switch_in_flight
+        && !app.auth_catalog_refresh_pending
+        && (!app.input.is_empty() || !app.pending_images.is_empty())
+    {
+        app.submit_input_on_startup = false;
+        app.startup_submit_deferred_reason = None;
+        let prepared = input::take_prepared_input(app);
+        app.last_submitted_input = Some(prepared.raw_input);
+        crate::logging::info(&format!(
+            "Startup auto-submit sent behind ordered Subscribe: input_chars={} pending_images={}",
+            prepared.expanded.chars().count(),
+            prepared.images.len(),
+        ));
+        if let Err(error) = begin_remote_send(
+            app,
+            remote,
+            prepared.expanded,
+            prepared.images,
+            false,
+            None,
+            false,
+            0,
+        )
+        .await
+        {
+            crate::logging::warn(&format!("Early startup auto-submit failed: {error}"));
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit startup prompt: {}",
+                error
+            )));
+            app.set_status_notice("Startup prompt failed");
+        }
+        return;
+    }
+
     if !remote.has_loaded_history() {
         note_startup_submit_deferred(app, "remote history not loaded yet");
         return;
@@ -1823,6 +1889,10 @@ fn handle_disconnected_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if handle_ctrl_kill_to_end(app, code, modifiers) {
+        return Ok(());
+    }
+
     if input::handle_navigation_shortcuts(app, code, modifiers) {
         return Ok(());
     }
@@ -1892,7 +1962,7 @@ fn handle_disconnected_key_internal(
         }
     }
 
-    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) {
+    if input::is_alternate_enter(code, modifiers) {
         queue_message_for_reconnect(app);
         return Ok(());
     }

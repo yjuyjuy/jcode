@@ -94,6 +94,7 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 /// Enable Kitty keyboard protocol for unambiguous key reporting.
@@ -970,11 +971,13 @@ pub struct LoginImportPrompt {
     pub seconds_left: u64,
 }
 
-/// The three actions on the import summary screen, left to right.
+/// The actions on the import summary screen, left to right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSummaryPill {
     /// Import everything we detected (default).
     Continue,
+    /// Sign in with a Jcode subscription instead of importing.
+    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.
@@ -1874,6 +1877,7 @@ mod tests {
 
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
         assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 }

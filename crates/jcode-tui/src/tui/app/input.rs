@@ -801,15 +801,54 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     let line_count = text.lines().count().max(1);
     if line_count < 5 {
         insert_input_text(app, &text);
-    } else {
-        app.pasted_contents.push(text);
-        let placeholder = format!(
-            "[pasted {} line{}]",
-            line_count,
-            if line_count == 1 { "" } else { "s" }
-        );
-        insert_input_text(app, &placeholder);
+        return;
     }
+    if expand_matching_paste(app, &text) {
+        return;
+    }
+
+    let placeholder = paste_placeholder(&text);
+    app.pasted_contents.push(text);
+    insert_input_text(app, &placeholder);
+}
+
+fn expand_matching_paste(app: &mut App, text: &str) -> bool {
+    let Some(content_index) = app
+        .pasted_contents
+        .iter()
+        .rposition(|content| content == text)
+    else {
+        return false;
+    };
+
+    let placeholder = paste_placeholder(text);
+    // Placeholders only encode a line count. Skip placeholders belonging to
+    // newer stored pastes with the same shape so equal-length, different text
+    // cannot cause the wrong placeholder to expand.
+    let newer_same_placeholder_count = app.pasted_contents[content_index + 1..]
+        .iter()
+        .filter(|content| paste_placeholder(content) == placeholder)
+        .count();
+    let Some(placeholder_start) = app
+        .input
+        .rmatch_indices(placeholder.as_str())
+        .map(|(position, _)| position)
+        .nth(newer_same_placeholder_count)
+    else {
+        return false;
+    };
+
+    app.follow_chat_bottom_for_typing();
+    app.remember_input_undo_state();
+    app.input.replace_range(
+        placeholder_start..placeholder_start + placeholder.len(),
+        text,
+    );
+    app.cursor_pos = placeholder_start + text.len();
+    app.pasted_contents.remove(content_index);
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    true
 }
 
 impl App {
@@ -1130,10 +1169,19 @@ pub(super) fn handle_multiline_input_navigation(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if !modifiers.is_empty()
-        || !matches!(code, KeyCode::Up | KeyCode::Down)
-        || !app.input.contains('\n')
-    {
+    if !modifiers.is_empty() || !matches!(code, KeyCode::Up | KeyCode::Down) {
+        return false;
+    }
+
+    // Prefer true visual-row movement: with soft wrapping a single logical
+    // line can occupy several rows, and Up/Down should follow what the user
+    // sees. Falls through to history recall at the first/last visual row.
+    if let Some(target) = visual_line_move_in_composer(app, code) {
+        app.cursor_pos = target;
+        return true;
+    }
+
+    if !app.input.contains('\n') {
         return false;
     }
 
@@ -1176,6 +1224,36 @@ pub(super) fn handle_multiline_input_navigation(
     true
 }
 
+/// Visual (wrapped-row) cursor movement using the composer's current render
+/// width. Returns `None` when the width is unknown or the cursor is already on
+/// the first/last visual row.
+fn visual_line_move_in_composer(app: &App, code: KeyCode) -> Option<usize> {
+    use crate::tui::ui::input_ui;
+
+    let width = composer_area_width()?;
+    let state: &dyn crate::tui::TuiState = app;
+    let next_prompt = input_ui::next_input_prompt_number(state);
+    let line_width = input_ui::composer_line_width(state, width, next_prompt)?;
+    let delta = match code {
+        KeyCode::Up => -1,
+        KeyCode::Down => 1,
+        _ => return None,
+    };
+    input_ui::visual_line_move(&app.input, app.cursor_pos, line_width, delta)
+}
+
+fn composer_area_width() -> Option<u16> {
+    if let Some(area) = crate::tui::ui::last_layout_snapshot().and_then(|l| l.input_area)
+        && area.width > 0
+    {
+        return Some(area.width);
+    }
+    crossterm::terminal::size()
+        .ok()
+        .map(|(w, _)| w)
+        .filter(|w| *w > 0)
+}
+
 /// True when `modifiers` is exactly one of Ctrl, Alt(Option) or Cmd(Super),
 /// the set of single modifiers we treat as "recall queued prompts / browse
 /// history" when combined with Up/Down. Shift or any combination is excluded so
@@ -1185,6 +1263,11 @@ pub(super) fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
         modifiers,
         KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER
     )
+}
+
+pub(super) fn is_alternate_enter(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Enter
+        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META)
 }
 
 pub(super) fn handle_prompt_history_navigation(
@@ -1474,7 +1557,14 @@ impl App {
         if self.todo_gate_digest_delivered {
             return false;
         }
-        let session_id = self.session_id().to_string();
+        // In a remote client `self.session` is the local wrapper session, while
+        // todo tools execute against the remote session. Reading the wrapper's
+        // files makes every persisted remote assessment appear to be missing.
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or_else(|| self.session_id())
+            .to_string();
         let observations = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
         if observations.is_empty() {
             return false;
@@ -1513,8 +1603,13 @@ impl App {
         }
 
         let todos = super::commands::poke_todos(self);
+        let todo_session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id)
+            .to_string();
         if !todos.is_empty()
-            && crate::todo::take_long_session_review_if_due(&self.session.id).unwrap_or(false)
+            && crate::todo::take_long_session_review_if_due(&todo_session_id).unwrap_or(false)
         {
             self.push_display_message(DisplayMessage::system(
                 "🔍 Rechecking the plan and assessments after extended work...",
@@ -1530,6 +1625,10 @@ impl App {
             .cloned()
             .collect();
         if incomplete.is_empty() {
+            // Completing or removing a todo list ends the prior poke cycle. If
+            // equivalent work appears later, it is a new cycle and deserves
+            // one fresh nudge rather than being mistaken for the old stall.
+            self.last_auto_poke_fingerprint = None;
             if todos.is_empty() {
                 // No todo list exists yet for this session. Auto-poke is armed
                 // by default (`features.auto_poke`), so disarming here would
@@ -1548,7 +1647,7 @@ impl App {
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }
-            let goals = crate::todo::load_goals(&self.session.id).unwrap_or_default();
+            let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
@@ -1561,7 +1660,9 @@ impl App {
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
                 self.queued_messages
-                    .push(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string());
+                    .push(crate::todo::build_todo_ownership_continuation_message(
+                        &todos, &goals,
+                    ));
                 self.pending_queued_dispatch = true;
                 return true;
             }
@@ -1593,7 +1694,9 @@ impl App {
                 self.pending_queued_dispatch = true;
                 return true;
             }
-            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
+            if (ownership_needs_followup
+                || confidence_summary.completion_confidence_needs_validation
+                || needs_spike_challenge)
                 && !gate_budget_left
             {
                 // The gate keeps failing but the model is no longer making
@@ -1632,6 +1735,17 @@ impl App {
             return false;
         }
 
+        let poke_message = super::commands::build_poke_message(&incomplete);
+        let fingerprint =
+            serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
+        if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
+            crate::logging::info(&format!(
+                "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
+                incomplete.len()
+            ));
+            return false;
+        }
+
         self.push_display_message(DisplayMessage::system(format!(
             "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
             incomplete.len(),
@@ -1651,8 +1765,8 @@ impl App {
         // Open todos mean the model is still iterating; completion-gate
         // exhaustion should only trip when the gate itself stops moving.
         self.todo_completion_gate_attempts = 0;
-        self.queued_messages
-            .push(super::commands::build_poke_message(&incomplete));
+        self.last_auto_poke_fingerprint = Some(fingerprint);
+        self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
     }
@@ -1723,11 +1837,11 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
     if code != KeyCode::Char(' ') {
         return false;
     }
-    // Accept either Command/Super+Space (macOS Cmd, often eaten by Spotlight) or
-    // Option/Alt+Space (macOS Option) so the fork-to-new-session arming hotkey is
-    // reachable across terminals. Reject Ctrl/Hyper combos so other chords still
-    // route to their own handlers.
-    let has_super = modifiers.contains(KeyModifiers::SUPER);
+    // Terminals report Command/Super as either SUPER or META depending on their
+    // keyboard protocol. Accept both encodings, plus Option/Alt+Space, so the
+    // shortcut remains reachable across terminals. Reject Ctrl/Hyper combos so
+    // other chords still route to their own handlers.
+    let has_super = modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META);
     let has_alt = modifiers.contains(KeyModifiers::ALT);
     (has_super || has_alt) && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::HYPER)
 }
@@ -2743,6 +2857,11 @@ impl App {
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        // Pick up config.toml keybinding edits before this key is matched.
+        // The idle tick refreshes too, but it can run as slowly as the 5s
+        // deep-idle cadence, which would leave the first keystroke after an
+        // edit matched against the old chords.
+        self.refresh_keybindings_if_config_reloaded();
         self.handle_key_core(
             event.code,
             event.modifiers,
@@ -2876,10 +2995,9 @@ impl App {
             return Ok(());
         }
 
-        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing
-        if code == KeyCode::Enter
-            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        {
+        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing.
+        // Terminals may encode Command as either Super or Meta.
+        if is_alternate_enter(code, modifiers) {
             handle_alternate_enter(self);
             return Ok(());
         }

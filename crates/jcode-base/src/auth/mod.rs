@@ -13,6 +13,7 @@ pub mod external;
 pub mod gemini;
 pub mod google;
 pub(crate) mod google_oauth;
+pub mod grok_build;
 pub mod integration;
 pub mod lifecycle;
 pub mod login_diagnostics;
@@ -399,6 +400,7 @@ impl AuthStatus {
             || self.antigravity == AuthState::Available
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
+            || self.grok_build == AuthState::Available
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
@@ -434,6 +436,7 @@ impl AuthStatus {
                 ("antigravity", self.antigravity.label().to_string()),
                 ("gemini", self.gemini.label().to_string()),
                 ("cursor", self.cursor.label().to_string()),
+                ("grok_build", self.grok_build.label().to_string()),
             ],
         );
     }
@@ -466,6 +469,7 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Antigravity => self.antigravity,
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
+            LoginProviderAuthStateKey::GrokBuild => self.grok_build,
             LoginProviderAuthStateKey::Google => self.google,
         }
     }
@@ -530,6 +534,7 @@ impl AuthStatus {
                     AuthState::NotConfigured
                 }
             }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => self.grok_build,
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 if crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                     AuthState::Available
@@ -599,6 +604,15 @@ impl AuthStatus {
                     }
                 } else {
                     "not configured".to_string()
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                if self.grok_build == AuthState::Available {
+                    "Jcode-managed Grok Build backend; subscription login is verified over ACP at request time".to_string()
+                } else if grok_build::cli_available() {
+                    "subscription login not configured (backend managed by Jcode)".to_string()
+                } else {
+                    "not configured (Jcode downloads the provider backend during login)".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -825,6 +839,24 @@ impl AuthStatus {
                     AuthValidationMethod::PresenceCheck,
                 )
             }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => (
+                if state == AuthState::Available {
+                    AuthCredentialSource::LocalCliSession
+                } else {
+                    AuthCredentialSource::None
+                },
+                if state == AuthState::Available {
+                    "Grok Build subscription login managed through Jcode".to_string()
+                } else if grok_build::cli_available() {
+                    "Jcode-managed backend provisioned; subscription login not configured"
+                        .to_string()
+                } else {
+                    "Jcode-managed Grok Build backend not provisioned".to_string()
+                },
+                AuthExpiryConfidence::Unknown,
+                AuthRefreshSupport::ExternalManaged,
+                AuthValidationMethod::CommandProbe,
+            ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 // Prefer the active named config profile's credential location
                 // (set via `--provider-profile`) over the built-in profile env
@@ -948,8 +980,11 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         probe_copilot_status(&mut status)
     });
     record_auth_probe_step(&mut timings, "antigravity", || {
-        status.antigravity =
-            token_state(antigravity::load_tokens().map(|tokens| tokens.is_expired()))
+        status.antigravity = refreshable_token_state(
+            "antigravity",
+            antigravity::load_tokens()
+                .map(|tokens| (tokens.is_expired(), tokens.refresh_token.clone())),
+        )
     });
     record_auth_probe_step(&mut timings, "gemini", || {
         // An official Gemini Developer API key is a static credential with no
@@ -958,11 +993,22 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         status.gemini = if gemini::has_api_key() {
             AuthState::Available
         } else {
-            token_state(gemini::load_tokens().map(|tokens| tokens.is_expired()))
+            refreshable_token_state(
+                "gemini",
+                gemini::load_tokens()
+                    .map(|tokens| (tokens.is_expired(), tokens.refresh_token.clone())),
+            )
         }
     });
     record_auth_probe_step(&mut timings, "cursor", || {
         probe_cursor_status(&mut status, mode)
+    });
+    record_auth_probe_step(&mut timings, "grok_build", || {
+        status.grok_build = if grok_build::cli_available() && grok_build::has_cached_login() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        }
     });
     record_auth_probe_step(&mut timings, "google", || probe_google_status(&mut status));
 
@@ -979,10 +1025,37 @@ fn record_auth_probe_step(
     timings.push((name, step_start.elapsed().as_millis()));
 }
 
-fn token_state(result: anyhow::Result<bool>) -> AuthState {
+/// Auth state for an OAuth credential that refreshes automatically.
+///
+/// A short-lived access token is *not* a broken login. Antigravity/Gemini
+/// access tokens expire roughly hourly and the provider transparently
+/// refreshes them on the next request, so reporting `Expired` purely because
+/// the cached access token aged out makes a perfectly working provider look
+/// dead in `/login`, the header, onboarding, and `jcode auth status`.
+///
+/// Only report `Expired` when the refresh token itself is missing or was
+/// already permanently rejected (revoked / `invalid_grant`), which is the case
+/// where the user genuinely has to log in again.
+fn refreshable_token_state(provider_id: &str, result: anyhow::Result<(bool, String)>) -> AuthState {
+    refreshable_token_state_with(result, |refresh_token| {
+        crate::auth::refresh_state::refresh_token_is_known_rejected(provider_id, refresh_token)
+    })
+}
+
+/// Pure decision core of [`refreshable_token_state`], with the persisted
+/// "this refresh token was permanently rejected" lookup injected so it can be
+/// unit tested without touching `$HOME`.
+fn refreshable_token_state_with(
+    result: anyhow::Result<(bool, String)>,
+    is_known_rejected: impl Fn(&str) -> bool,
+) -> AuthState {
     match result {
-        Ok(is_expired) => {
-            if is_expired {
+        Ok((is_expired, refresh_token)) => {
+            if !is_expired {
+                return AuthState::Available;
+            }
+            let refresh_token = refresh_token.trim();
+            if refresh_token.is_empty() || is_known_rejected(refresh_token) {
                 AuthState::Expired
             } else {
                 AuthState::Available
@@ -1024,7 +1097,7 @@ fn probe_anthropic_status(status: &mut AuthStatus) {
 }
 
 fn probe_openrouter_status(status: &mut AuthStatus) {
-    if crate::provider::openrouter::has_credentials() {
+    if crate::provider::openrouter::has_openrouter_credentials() {
         status.openrouter = AuthState::Available;
     }
 }
@@ -1244,6 +1317,21 @@ fn assessment_for_key(
                 AuthValidationMethod::CompositeProbe,
             )
         }
+        LoginProviderAuthStateKey::GrokBuild => (
+            if state == AuthState::Available {
+                AuthCredentialSource::LocalCliSession
+            } else {
+                AuthCredentialSource::None
+            },
+            if state == AuthState::Available {
+                "Grok CLI cached login".to_string()
+            } else {
+                "Grok CLI unavailable".to_string()
+            },
+            AuthExpiryConfidence::Unknown,
+            AuthRefreshSupport::ExternalManaged,
+            AuthValidationMethod::CommandProbe,
+        ),
         LoginProviderAuthStateKey::Google => {
             let (source, detail) = summarize_sources(vec![google_source()]);
             (

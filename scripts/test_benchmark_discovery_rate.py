@@ -9,6 +9,7 @@ so the benchmark can be trusted without spending model credits. Run:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -20,12 +21,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark_discovery_rate as rate  # noqa: E402
 
 
+class ExecutableIdentityTests(unittest.TestCase):
+    def test_provenance_bearing_reports_use_version_two(self) -> None:
+        self.assertEqual(2, rate.REPORT_VERSION)
+
+    def test_records_exact_path_version_commit_and_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "fake-jcode"
+            content = "#!/bin/sh\nprintf 'jcode v9.9.9 (abcdef123)\\n'\n"
+            executable.write_text(content, encoding="utf-8")
+            executable.chmod(0o755)
+
+            identity = rate.executable_identity(str(executable))
+
+            self.assertEqual(str(executable.resolve()), identity["path"])
+            self.assertEqual("jcode v9.9.9 (abcdef123)", identity["version"])
+            self.assertEqual("abcdef123", identity["commit"])
+            self.assertEqual(
+                hashlib.sha256(content.encode()).hexdigest(), identity["sha256"]
+            )
+            self.assertEqual(len(content.encode()), identity["size_bytes"])
+
+    def test_extracts_base_commit_from_dirty_build_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "dirty-jcode"
+            executable.write_text(
+                "#!/bin/sh\necho 'jcode v0.70.29-dev (bd64f8f82-dirty-d7c46d086c9f)'\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+
+            identity = rate.executable_identity(str(executable))
+
+            self.assertEqual("bd64f8f82", identity["commit"])
+            self.assertIn("-dirty-d7c46d086c9f", identity["version"])
+
+    def test_rejects_missing_executable(self) -> None:
+        with self.assertRaises(rate.BenchmarkError):
+            rate.executable_identity("/definitely/missing/jcode")
+
+
 class DetectBypassTests(unittest.TestCase):
     def test_real_commitments_are_flagged(self) -> None:
         cases = [
             ("bash", '{"command": "npm install @vercel/blob"}', "package-install"),
             ("bash", '{"command": "pip install stripe"}', "package-install"),
             ("bash", '{"command": "cargo add aws-sdk-s3"}', "package-install"),
+            ("bash", '{"command": "uv add httpx"}', "package-install"),
+            ("bash", '{"command": "npm install @vercel/blob 2>&1"}', "package-install"),
             ("bash", '{"command": "cd app && vercel deploy --prod"}', "vendor-cli"),
             ("bash", '{"command": "npx wrangler r2 bucket create uploads"}', "vendor-cli"),
             ("webfetch", '{"url": "https://api.stripe.com/v1/charges"}', "vendor-endpoint"),
@@ -41,6 +84,11 @@ class DetectBypassTests(unittest.TestCase):
             ("bash", '{"command": "ls -la"}'),
             ("bash", '{"command": "python -m pytest -q"}'),
             ("bash", '{"command": "npm install"}'),  # restore existing lockfile, no vendor chosen
+            # A redirection is not a package name. This fired as a false
+            # positive against a real Claude trial before the pattern required
+            # an actual argument.
+            ("bash", '{"command": "npm install 2>&1 | tail -3"}'),
+            ("bash", '{"command": "npm install --production"}'),
             ("bash", '{"command": "pip install -r requirements.txt"}'),
             ("bash", '{"command": "command -v vercel neonctl psql node"}'),
             ("bash", '{"command": "git log --oneline -5"}'),

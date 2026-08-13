@@ -16,6 +16,10 @@
 /// strip is split between the adjacent sessions so they are always
 /// discoverable.
 const COLUMN_FRACTION: f64 = 0.76;
+const COLUMN_FRACTION_UNITS: u16 = 760;
+const MIN_COLUMN_FRACTION_UNITS: u16 = 400;
+const MAX_COLUMN_FRACTION_UNITS: u16 = 1000;
+const COLUMN_RESIZE_STEP_UNITS: u16 = 50;
 /// Space between session pages, in logical pixels.
 pub const GAP: f64 = 14.0;
 /// Breathing room above and below every page while the workspace chrome is
@@ -78,6 +82,9 @@ pub struct Workspace {
     prev_row: Vec<String>,
     /// Which column of the departing row was focused, so it exits centered.
     prev_focused: usize,
+    /// Width of the focused session page in thousandths of the viewport.
+    /// This changes the child page only; the containing OS window is untouched.
+    column_fraction: u16,
 }
 
 impl Default for Workspace {
@@ -87,6 +94,7 @@ impl Default for Workspace {
             side_bias: Direction::Right,
             prev_row: Vec::new(),
             prev_focused: 0,
+            column_fraction: COLUMN_FRACTION_UNITS,
         }
     }
 }
@@ -126,6 +134,31 @@ impl Column {
 }
 
 impl Workspace {
+    /// Grow or shrink the focused session page. Returns whether it changed.
+    pub fn resize_column(&mut self, grow: bool) -> bool {
+        let previous = self.column_fraction;
+        self.column_fraction = if grow {
+            self.column_fraction
+                .saturating_add(COLUMN_RESIZE_STEP_UNITS)
+        } else {
+            self.column_fraction
+                .saturating_sub(COLUMN_RESIZE_STEP_UNITS)
+        }
+        .clamp(MIN_COLUMN_FRACTION_UNITS, MAX_COLUMN_FRACTION_UNITS);
+        self.column_fraction != previous
+    }
+
+    pub fn column_percent(&self) -> u16 {
+        self.column_fraction / 10
+    }
+
+    pub fn column_width(&self, viewport_width: u32, session_count: usize) -> u32 {
+        if session_count <= 1 {
+            return viewport_width;
+        }
+        ((u64::from(viewport_width) * u64::from(self.column_fraction) + 500) / 1000) as u32
+    }
+
     /// Start a horizontal camera move after the strip has moved focus to its
     /// destination. At phase zero the old neighbor is still centered and the
     /// new focused page starts one pitch away; the offset then eases to zero.
@@ -299,13 +332,13 @@ pub fn column_width(viewport_width: u32, session_count: usize) -> u32 {
 /// same reason [`crate::layout::Frame`] is shared: if the two ever disagreed,
 /// clicks would land on a different page than the one under the cursor.
 pub fn placement(
-    strip: &crate::strip::Strip,
+    strip: &crate::strip::Strips,
     workspace: &Workspace,
     session_id: Option<&str>,
     viewport: (f64, f64),
     gap: f64,
 ) -> Vec<Column> {
-    let groups = strip.groups();
+    let groups = strip.strips();
     if groups.is_empty() {
         return Vec::new();
     }
@@ -316,12 +349,12 @@ pub fn placement(
     let mut base = 0usize;
     for group in groups {
         bases.push(base);
-        base += group.entries.len();
+        base += group.panels.len();
     }
     let locate = |id: &str| {
         groups.iter().enumerate().find_map(|(g, group)| {
             group
-                .entries
+                .panels
                 .iter()
                 .position(|entry| entry.session_id == id)
                 .map(|i| (g, i))
@@ -330,15 +363,15 @@ pub fn placement(
     // The attached session anchors the camera; the strip's own focus is the
     // fallback for the moments before an attach resolves.
     let (group, pos) = session_id.and_then(locate).unwrap_or_else(|| {
-        let group = strip.group_index().min(groups.len() - 1);
-        let len = groups[group].entries.len();
-        (group, strip.index().min(len.saturating_sub(1)))
+        let group = strip.strip_index().min(groups.len() - 1);
+        let len = groups[group].panels.len();
+        (group, strip.panel_index().min(len.saturating_sub(1)))
     });
-    let row: Vec<usize> = (0..groups[group].entries.len())
+    let row: Vec<usize> = (0..groups[group].panels.len())
         .map(|i| bases[group] + i)
         .collect();
     let current = RowSpec {
-        column_width: f64::from(column_width(viewport.0.round() as u32, row.len())),
+        column_width: f64::from(workspace.column_width(viewport.0.round() as u32, row.len())),
         focused_pos: pos,
         indices: row,
     };
@@ -351,7 +384,9 @@ pub fn placement(
                 .filter_map(|id| locate(id).map(|(g, i)| bases[g] + i))
                 .collect();
             RowSpec {
-                column_width: f64::from(column_width(viewport.0.round() as u32, indices.len())),
+                column_width: f64::from(
+                    workspace.column_width(viewport.0.round() as u32, indices.len()),
+                ),
                 focused_pos: prev_focused.min(indices.len().saturating_sub(1)),
                 indices,
             }
@@ -382,7 +417,7 @@ fn ring_offset(index: usize, focused: usize, len: usize, bias: Direction) -> isi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strip::{Entry, Strip};
+    use crate::strip::{Panel, Strips};
 
     const VIEW: (f64, f64) = (1000.0, 700.0);
     const WIDTH: f64 = 760.0;
@@ -410,6 +445,21 @@ mod tests {
         assert_eq!(column_width(1000, 0), 1000);
         assert_eq!(column_width(1000, 1), 1000);
         assert_eq!(column_width(1000, 3), 760);
+    }
+
+    #[test]
+    fn resized_panel_width_survives_focus_transitions() {
+        let mut workspace = Workspace::default();
+        assert!(workspace.resize_column(true));
+        let resized = workspace.column_width(1000, 3);
+
+        workspace.begin(Direction::Right);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+        workspace.advance(TRANSITION_SECONDS);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+
+        workspace.begin_row_change(Direction::Down, vec!["old".into()], 0);
+        assert_eq!(workspace.column_width(1000, 3), resized);
     }
 
     #[test]
@@ -517,8 +567,8 @@ mod tests {
         );
     }
 
-    fn entry(id: &str, dir: &str) -> Entry {
-        Entry {
+    fn entry(id: &str, dir: &str) -> Panel {
+        Panel {
             session_id: id.into(),
             title: None,
             working_dir: Some(dir.into()),
@@ -531,7 +581,7 @@ mod tests {
     /// that is what makes a column's neighbors always mean "same project".
     #[test]
     fn placement_shows_only_the_focused_group_at_rest() {
-        let strip = Strip::build(
+        let strip = Strips::build(
             vec![
                 entry("a1", "/w/jcode"),
                 entry("a2", "/w/jcode"),
@@ -550,7 +600,7 @@ mod tests {
     /// list cannot make the wrong pages fly off.
     #[test]
     fn placement_draws_the_departing_row_during_a_slide() {
-        let strip = Strip::build(
+        let strip = Strips::build(
             vec![
                 entry("a1", "/w/jcode"),
                 entry("a2", "/w/jcode"),
@@ -576,7 +626,7 @@ mod tests {
     /// rather than panicking or drawing a stranger in its place.
     #[test]
     fn placement_survives_a_departing_session_disappearing() {
-        let strip = Strip::build(vec![entry("b1", "/w/site")], Some("b1"));
+        let strip = Strips::build(vec![entry("b1", "/w/site")], Some("b1"));
         let mut workspace = Workspace::default();
         workspace.begin_row_change(Direction::Down, vec!["gone".into()], 0);
         let columns = placement(&strip, &workspace, Some("b1"), VIEW, GAP);

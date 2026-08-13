@@ -71,9 +71,8 @@ impl App {
         let configured_base = crate::subscription_catalog::configured_api_base()
             .unwrap_or_else(|| crate::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string());
         let runtime_mode = crate::subscription_catalog::is_runtime_mode_enabled();
-        let cached_tier = crate::subscription_catalog::cached_tier();
 
-        let mut message = String::from("Jcode Subscription Status\n\n");
+        let mut message = String::from("Jcode Hosted Model Status\n\n");
         message.push_str(&format!(
             "  - Credentials: {}\n",
             if configured_key {
@@ -91,12 +90,7 @@ impl App {
                 " (default)"
             }
         ));
-        message.push_str(&format!(
-            "  - Tier: {}\n",
-            cached_tier
-                .map(|tier| tier.display_name().to_string())
-                .unwrap_or_else(|| "unknown (treated as Plus)".to_string())
-        ));
+        message.push_str("  - Billing: pay as you go, no subscription fee\n");
         message.push_str(&format!(
             "  - Runtime mode: {}\n\n",
             if runtime_mode {
@@ -113,11 +107,7 @@ impl App {
             } else {
                 ""
             };
-            let tier_suffix = if model.min_tier == crate::subscription_catalog::JcodeTier::Plus {
-                String::new()
-            } else {
-                format!(" [{}]", model.min_tier.display_name())
-            };
+            let tier_suffix = String::new();
             message.push_str(&format!(
                 "  - {} - {}{}{}\n      - {}\n      - {}\n",
                 model.display_name,
@@ -129,20 +119,19 @@ impl App {
             ));
         }
 
-        message.push_str("\nTiers\n\n");
-        for tier in crate::subscription_catalog::JcodeTier::ALL.iter().copied() {
-            message.push_str(&format!(
-                "  - {} - ${}/mo retail, about ${:.2} usable inference budget\n",
-                tier.display_name(),
-                tier.retail_price_usd(),
-                tier.usable_budget_usd()
-            ));
-        }
+        message.push_str("\nBilling\n\n");
+        message.push_str("  - Set the monthly spending limit you control in your Jcode account\n");
+        message.push_str("  - Email and account warnings are sent at usage milestones\n");
+        message.push_str("  - Warning milestones do not rate limit hosted requests\n");
+        message.push_str("  - Charges begin at $20, then use progressively larger tranches\n");
+        message.push_str("  - Any unbilled remainder is collected at your limit or month end\n");
 
         if configured_key {
-            message.push_str("\nFetching account status...");
+            message.push_str("\nFetching hosted usage and spending limit...");
         } else {
-            message.push_str("\nLog in with /login jcode to see account usage and tier.");
+            message.push_str(
+                "\nLog in with /login jcode to set a spending limit and connect hosted models.",
+            );
         }
 
         self.push_display_message(DisplayMessage::system(message));
@@ -156,10 +145,6 @@ impl App {
                 handle.spawn(async move {
                     match crate::subscription_api::fetch_subscription_me().await {
                         Ok(me) => {
-                            let tier_label = me
-                                .parsed_tier()
-                                .map(|tier| tier.display_name().to_string())
-                                .unwrap_or_else(|| me.tier.clone());
                             let resets = me
                                 .usage
                                 .resets_at
@@ -170,15 +155,19 @@ impl App {
                                 crate::bus::UiActivity::background(
                                     Some(session_id),
                                     format!(
-                                        "Jcode Subscription Account\n\n  - Email: {}\n  - Tier: {} ({})\n  - Usage: ${:.2} of ${:.2}{}",
+                                        "Jcode Hosted Model Account\n\n  - Email: {}\n  - Billing: {}\n  - Spend: ${:.2} of ${:.2} monthly limit\n  - Billed in tranches: ${:.2}{}{}",
                                         me.email,
-                                        tier_label,
                                         me.status,
                                         me.usage.used_usd,
                                         me.usage.budget_usd,
+                                        me.usage.billed_usd,
+                                        me.usage
+                                            .next_charge_at_usd
+                                            .map(|amount| format!("\n  - Next tranche at: ${amount:.2}"))
+                                            .unwrap_or_default(),
                                         resets
                                     ),
-                                    Some("Subscription: account status loaded"),
+                                    Some("Hosted usage: account status loaded"),
                                 ),
                             ));
                         }
@@ -572,6 +561,9 @@ impl App {
                 self.start_openai_compatible_profile_login(profile)
             }
             crate::provider_catalog::LoginProviderTarget::Cursor => self.start_cursor_login(),
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                self.start_grok_build_login()
+            }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
             crate::provider_catalog::LoginProviderTarget::Antigravity => {
@@ -636,7 +628,7 @@ impl App {
             let device = match crate::subscription_api::request_device_authorization(
                 &client,
                 &api_base,
-                Some(crate::subscription_catalog::JcodeTier::Pro),
+                None,
             )
             .await
             {
@@ -728,10 +720,10 @@ impl App {
             crate::auth::AuthStatus::invalidate_cache();
             publish(
                 format!(
-                    "Jcode Account Approved\n\nSigned in as {}. The key is stored with owner-only permissions. Waiting for an active paid plan on /v1/me...",
+                    "Jcode Account Approved\n\nSigned in as {}. The API key is stored with owner-only permissions. Finish setting your monthly spending limit in the browser; Jcode is checking /v1/me...",
                     approved.email
                 ),
-                "Jcode account: waiting for plan activation",
+                "Jcode account: waiting for spending limit",
             );
 
             match crate::subscription_api::poll_for_paid_activation(
@@ -745,13 +737,11 @@ impl App {
             {
                 ActivationOutcome::Active(me) => {
                     let message = format!(
-                        "Jcode Account Ready\n\n{} is active for {}. Models are being refreshed automatically.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout",
-                        me.parsed_tier()
-                            .map(|tier| tier.display_name().to_string())
-                            .unwrap_or(me.tier),
-                        me.email
+                        "Jcode Account Ready\n\nHosted models are enabled for {} with a ${:.2} monthly spending limit. Models are being refreshed automatically.\n\nUsage: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout",
+                        me.email,
+                        me.usage.budget_usd
                     );
-                    publish(message.clone(), "Jcode account plan active");
+                    publish(message.clone(), "Jcode hosted models ready");
 
                     // The device flow used to stop after saving the credential and
                     // publishing a status message. Unlike every other login flow it
@@ -759,7 +749,7 @@ impl App {
                     // running provider retained its pre-login routes until the user
                     // manually ran /refresh-model-list. Route activation also powers
                     // model-switch availability checks, which made every newly shown
-                    // subscription model appear unavailable in that stale runtime.
+                    // hosted model appear unavailable in that stale runtime.
                     crate::bus::Bus::global().publish(
                         crate::bus::BusEvent::LoginCompleted(crate::bus::LoginCompleted {
                             provider: "jcode".to_string(),
@@ -769,15 +759,15 @@ impl App {
                     );
                 }
                 ActivationOutcome::Canceled(_) => publish(
-                    "Jcode Account Login\n\nCheckout was canceled. The valid account key remains saved, but no paid plan is active.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout".to_string(),
-                    "Jcode account plan not active",
+                    "Jcode Account Login\n\nBilling setup was canceled. The valid account key remains saved, but hosted usage is not enabled.\n\nStatus: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout".to_string(),
+                    "Jcode hosted billing not active",
                 ),
                 ActivationOutcome::TimedOut { last_error_was_offline } => publish(
                     format!(
-                        "Jcode Account Login\n\nPlan activation was not confirmed before timeout{}. The valid account key remains saved.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout",
+                        "Jcode Account Login\n\nA spending limit was not confirmed before timeout{}. The valid account key remains saved.\n\nStatus: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout",
                         if last_error_was_offline { " because the API remained unreachable" } else { "" }
                     ),
-                    "Jcode account activation pending",
+                    "Jcode hosted billing setup pending",
                 ),
                 ActivationOutcome::Revoked | ActivationOutcome::Denied => {
                     let _ = crate::subscription_catalog::clear_account_credentials();
@@ -1783,6 +1773,118 @@ impl App {
         ));
     }
 
+    fn start_grok_build_login(&mut self) {
+        self.set_status_notice("Grok Build: preparing sign-in...");
+        self.begin_pending_login(PendingLogin::GrokBuild);
+        self.push_display_message(DisplayMessage::system(
+            "Grok Build Login\n\nJcode is preparing the managed provider backend. The xAI sign-in URL and device code will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
+                .to_string(),
+        ));
+
+        let session_id = self.session.id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                provider: "grok-build".to_string(),
+                success: false,
+                message: "Grok Build login requires the async runtime.".to_string(),
+            }));
+            return;
+        };
+        handle.spawn(async move {
+            let publish_progress = |message: String, status: &'static str| {
+                Bus::global().publish(BusEvent::UiActivity(crate::bus::UiActivity::auth(
+                    Some(session_id.clone()),
+                    message,
+                    Some(status),
+                )));
+            };
+
+            let cli = match crate::auth::grok_build::ensure_cli().await {
+                Ok(cli) => cli,
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Failed to prepare Grok Build: {error:#}"),
+                    }));
+                    return;
+                }
+            };
+            publish_progress(
+                "Grok Build Login\n\nManaged backend ready. Requesting xAI authorization..."
+                    .to_string(),
+                "Grok Build: requesting authorization",
+            );
+
+            let mut child = match tokio::process::Command::new(&cli)
+                .arg("login")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!(
+                            "Failed to start Jcode's managed Grok Build backend: {error}"
+                        ),
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stderr) = child.stderr.take() {
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let mut lines = tokio::io::BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        Bus::global().publish(BusEvent::UiActivity(
+                            crate::bus::UiActivity::auth(
+                                Some(session_id.clone()),
+                                line.to_string(),
+                                Some("Grok Build: waiting for browser approval"),
+                            ),
+                        ));
+                    }
+                });
+            }
+
+            match child.wait().await {
+                Ok(status) if status.success() => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: true,
+                        message: "Grok Build login complete. Jcode is refreshing the provider and model list."
+                            .to_string(),
+                    }));
+                }
+                Ok(status) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Grok Build login exited with status {status}."),
+                    }));
+                }
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Grok Build login failed: {error}"),
+                    }));
+                }
+            }
+        });
+    }
+
     fn start_antigravity_login(&mut self) {
         let (verifier, challenge) = crate::auth::oauth::generate_pkce_public();
         let expected_state = crate::auth::oauth::generate_state_public();
@@ -2605,6 +2707,13 @@ impl App {
                         .to_string(),
                 ));
                 self.pending_login = Some(PendingLogin::Copilot);
+            }
+            PendingLogin::GrokBuild => {
+                self.push_display_message(DisplayMessage::system(
+                    "Grok Build login is waiting for browser authorization. Complete the xAI login in your browser, or type /cancel to dismiss."
+                        .to_string(),
+                ));
+                self.pending_login = Some(PendingLogin::GrokBuild);
             }
             PendingLogin::AutoImportSelection { candidates } => {
                 let selected = match crate::external_auth::parse_external_auth_review_selection(

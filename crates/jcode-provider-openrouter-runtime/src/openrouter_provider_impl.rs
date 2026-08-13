@@ -60,8 +60,17 @@ impl Provider for OpenRouterProvider {
                 None
             }
         });
-        let allow_reasoning = (self.supports_provider_features || kimi_coding_endpoint)
-            && thinking_enabled != Some(false);
+        // DeepSeek-family models served through a direct OpenAI-compatible
+        // profile can run thinking mode server-side. Their follow-up requests
+        // must replay the `reasoning_content` returned with an assistant tool
+        // call even though the route has no OpenRouter provider features
+        // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
+        // not synthesize the field when the prior turn did not return one.
+        let direct_deepseek_model =
+            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
+        let allow_reasoning =
+            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
+                && thinking_enabled != Some(false);
         let include_reasoning_content = thinking_enabled == Some(true)
             || (allow_reasoning && Self::is_kimi_model(&model))
             || kimi_coding_endpoint;
@@ -742,7 +751,9 @@ impl Provider for OpenRouterProvider {
         // was actually serving 4K. It stays *below* the live catalog and the
         // user's explicit per-model `context_window`, both of which are real
         // evidence about this endpoint.
-        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
+        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref())
+            && !super::ollama_context::is_cloud_model(&model_id)
+        {
             return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
         }
         if let Some(profile_id) = self.profile_id.as_deref()
@@ -784,7 +795,12 @@ impl Provider for OpenRouterProvider {
                     .map(|r| r.clone())
                     .unwrap_or_default(),
             )),
-            provider_pin: Arc::new(Mutex::new(None)),
+            provider_pin: Arc::new(Mutex::new(
+                self.provider_pin
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
         })

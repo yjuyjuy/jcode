@@ -53,14 +53,14 @@ impl App {
         }
         let row_len = self
             .model
-            .strip
-            .focused_group()
-            .map(|group| group.entries.len())
+            .strips
+            .focused_strip()
+            .map(|group| group.panels.len())
             .unwrap_or(1);
         let scale = self.effective_scale();
         let inset = (workspace::VERTICAL_INSET * scale * 2.0).round() as u32;
         (
-            workspace::column_width(viewport.0, row_len),
+            self.model.workspace.column_width(viewport.0, row_len),
             viewport.1.saturating_sub(inset).max(1),
         )
     }
@@ -80,7 +80,7 @@ impl App {
         let size = state.size();
         let scale = self.effective_scale();
         let origin = workspace::placement(
-            &self.model.strip,
+            &self.model.strips,
             &self.model.workspace,
             self.model.session_id.as_deref(),
             (f64::from(size.0), f64::from(size.1)),
@@ -102,17 +102,17 @@ impl App {
     pub(crate) fn focused_row_snapshot(&self) -> (Vec<String>, usize) {
         let ids = self
             .model
-            .strip
-            .focused_group()
+            .strips
+            .focused_strip()
             .map(|group| {
                 group
-                    .entries
+                    .panels
                     .iter()
                     .map(|entry| entry.session_id.clone())
                     .collect()
             })
             .unwrap_or_default();
-        (ids, self.model.strip.index())
+        (ids, self.model.strips.panel_index())
     }
 
     /// Whether the workspace chrome (gutters, page rings, camera) is in play:
@@ -125,9 +125,9 @@ impl App {
             return true;
         }
         self.model
-            .strip
-            .focused_group()
-            .map(|group| group.entries.len() > 1)
+            .strips
+            .focused_strip()
+            .map(|group| group.panels.len() > 1)
             .unwrap_or(false)
     }
 }

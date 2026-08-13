@@ -2,16 +2,16 @@ use crate::auth::{AuthState, AuthStatus};
 
 use super::pricing::cheapness_for_route;
 use super::{
-    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, ModelRoute, MultiProvider,
-    Provider, anthropic_api_key_route_availability, anthropic_oauth_route_availability, bedrock,
-    build_anthropic_oauth_route, build_chatgpt_web_route, build_copilot_route,
-    build_openai_api_key_route, build_openai_oauth_route, build_openrouter_auto_route,
-    build_openrouter_endpoint_route, build_openrouter_fallback_provider_route,
-    configured_standard_openrouter_profile_routes, copilot, dedupe_model_routes,
-    direct_openai_compatible_profile_routes, format_account_model_availability_detail,
-    is_listable_model_name, known_anthropic_model_ids, known_openai_model_ids,
-    model_availability_for_account, openrouter, openrouter_catalog_model_id, provider_for_model,
-    standard_openrouter_profile_configured,
+    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, GROK_BUILD_PROFILE_ID,
+    ModelRoute, MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
+    anthropic_oauth_route_availability, bedrock, build_anthropic_oauth_route,
+    build_chatgpt_web_route, build_copilot_route, build_openai_api_key_route,
+    build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
+    build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
+    copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
+    format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
+    known_openai_model_ids, model_availability_for_account, openrouter,
+    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
 };
 
 /// Build the fast local route snapshot used by the TUI model picker while the
@@ -240,14 +240,14 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     append_cursor_routes(provider, &mut routes);
     append_bedrock_routes(provider, &mut routes);
 
-    let has_openrouter = provider.openrouter_provider().is_some();
+    let has_openrouter_transport = provider.openrouter_provider().is_some();
     let has_openrouter_provider_features = provider
         .openrouter_provider()
         .map(|openrouter| openrouter.supports_provider_routing_features())
         .unwrap_or(false);
     append_openrouter_routes(provider, &mut routes, &mut openrouter_stats);
 
-    if !has_openrouter && !added_direct_openai_compatible_routes {
+    if !has_openrouter_transport && !added_direct_openai_compatible_routes {
         // OpenRouter not configured - show a placeholder as unavailable.
         routes.push(ModelRoute {
             model: "openrouter models".to_string(),
@@ -268,7 +268,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
         crate::logging::info(&format!(
             "[TIMING] model_routes: routes={}, openrouter_configured={}, openrouter_models={}, openrouter_endpoint_cache_hits={}, openrouter_endpoint_routes={}, openrouter_scheduled_endpoint_refreshes={}, total={}ms",
             routes.len(),
-            has_openrouter,
+            has_openrouter_provider_features,
             openrouter_stats.models,
             openrouter_stats.endpoint_cache_hits,
             openrouter_stats.endpoint_routes,
@@ -285,7 +285,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     // flooded with hundreds of unusable entries.
     routes.retain(|route| is_listable_model_name(&route.model));
 
-    let routes = dedupe_model_routes(routes);
+    let mut routes = dedupe_model_routes(routes);
 
     // Structured, always-on summary of catalog route building. This is the
     // single most useful line for the recurring "model picker empty / only
@@ -301,12 +301,24 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
         has_api_key,
         openai_auth.openai_has_oauth,
         openai_auth.openai_has_api_key,
-        has_openrouter,
+        has_openrouter_provider_features,
         has_openrouter_provider_features,
         added_direct_openai_compatible_routes,
         total_ms,
     );
 
+    if let Some(grok) = ProviderRegistry::new(provider).compatible_profile(GROK_BUILD_PROFILE_ID) {
+        for mut route in grok.model_routes() {
+            route.model = format!("grok-build:{}", route.model);
+            route.provider = "Grok Build".to_string();
+            route.api_method = "grok-build-acp".to_string();
+            if !routes.iter().any(|existing| {
+                existing.model == route.model && existing.api_method == route.api_method
+            }) {
+                routes.push(route);
+            }
+        }
+    }
     routes
 }
 
@@ -889,6 +901,13 @@ pub fn remote_model_routes_fallback(
             continue;
         }
 
+        if model.contains('/')
+            && let Some(route) = remote_openai_compatible_route_for_model(model)
+        {
+            routes.push(route);
+            continue;
+        }
+
         if model.contains('/') {
             let cached = openrouter_cached;
             let auto_detail = cached
@@ -1103,7 +1122,7 @@ pub fn remote_current_openai_compatible_route_for_model(
     remote_provider_name: Option<&str>,
     model: &str,
 ) -> Option<ModelRoute> {
-    if model.trim().is_empty() || model.contains('/') || provider_for_model(model).is_some() {
+    if model.trim().is_empty() || (!model.contains('/') && provider_for_model(model).is_some()) {
         return None;
     }
 
@@ -1115,6 +1134,13 @@ pub fn remote_current_openai_compatible_route_for_model(
         return None;
     }
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    if model.contains('/')
+        && !remote_openai_compatible_profile_models(&resolved, profile)
+            .iter()
+            .any(|candidate| candidate.0 == model)
+    {
+        return None;
+    }
 
     Some(ModelRoute {
         model: model.to_string(),
@@ -1419,6 +1445,95 @@ mod tests {
         }
     }
 
+    /// Issue #694 through the real path a user hits: a custom
+    /// `[providers.<name>]` profile in config.toml. The picker must route the
+    /// model to that profile, and must not offer it a Copilot route.
+    #[test]
+    fn custom_config_profile_model_is_routed_and_not_offered_a_copilot_route() {
+        let _guard = EnvGuard::new();
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            "[providers.omlx]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:18000/v1\"\ndefault_model = \"KAT-Coder-V2.5-Dev-OptiQ-4bit\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let model = "KAT-Coder-V2.5-Dev-OptiQ-4bit";
+        let route = remote_openai_compatible_route_for_model(model)
+            .expect("custom config profile model must be routed to its profile");
+        assert_eq!(route.provider, "omlx");
+        assert_eq!(route.api_method, "openai-compatible:omlx");
+        assert!(
+            !remote_model_should_offer_copilot_route(model),
+            "a custom profile's model must never be offered a Copilot route"
+        );
+
+        // The full fallback builder (what the picker renders) agrees.
+        let routes = remote_model_routes_fallback(Some("omlx"), &[model.to_string()]);
+        assert!(
+            routes
+                .iter()
+                .all(|route| !route.api_method.contains("copilot")),
+            "picker routes must not contain a copilot route: {routes:?}"
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.api_method == "openai-compatible:omlx"),
+            "picker routes must include the profile route: {routes:?}"
+        );
+    }
+
+    /// Issue #694 across both route sources. The picker is fed either by the
+    /// server-built catalog (named profile routes) or, before that frame
+    /// arrives, by the client-side fallback. Neither may attach a Copilot
+    /// route to a custom profile model, otherwise the label flickers to
+    /// Copilot and the selected id becomes a copilot-prefixed id.
+    #[test]
+    fn custom_config_profile_model_never_gets_a_copilot_route_from_either_source() {
+        let _guard = EnvGuard::new();
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            "[providers.omlx]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:18000/v1\"\ndefault_model = \"KAT-Coder-V2.5-Dev-OptiQ-4bit\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let model = "KAT-Coder-V2.5-Dev-OptiQ-4bit";
+
+        // Source 1: the named-profile routes the server contributes.
+        let named = named_provider_profile_routes(
+            "omlx",
+            crate::config::config()
+                .providers
+                .get("omlx")
+                .expect("omlx profile"),
+        );
+        assert!(
+            named
+                .iter()
+                .any(|route| route.model == model && route.api_method == "openai-compatible:omlx"),
+            "server catalog must offer the profile route: {named:?}"
+        );
+
+        // Source 2: the client-side fallback, including the lightweight
+        // variant used while route details are still refreshing.
+        for routes in [
+            remote_model_routes_fallback(Some("omlx"), &[model.to_string()]),
+            remote_model_routes_lightweight_fallback(Some("omlx"), &[model.to_string()], model),
+        ] {
+            assert!(!routes.is_empty(), "fallback must offer the model");
+            assert!(
+                routes.iter().all(|route| {
+                    !route.api_method.contains("copilot") && route.provider != "Copilot"
+                }),
+                "no source may attach a Copilot route: {routes:?}"
+            );
+        }
+    }
+
     #[test]
     fn remote_compatible_route_uses_live_cache_and_does_not_mark_fallback() {
         let guard = EnvGuard::new();
@@ -1431,6 +1546,35 @@ mod tests {
         assert_eq!(route.api_method, "openai-compatible:opencode");
         assert_eq!(route.detail, "https://opencode.ai/zen/v1");
         assert!(!route.detail.contains("fallback"));
+    }
+
+    #[test]
+    fn slash_model_fallback_prefers_matching_compatible_profile() {
+        let guard = EnvGuard::new();
+        let model = "vendouple/gpt-5.6-sol";
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
+
+        let routes = remote_model_routes_fallback(Some("OpenCode Zen"), &[model.to_string()]);
+
+        assert_eq!(routes.len(), 1, "unexpected fallback routes: {routes:?}");
+        assert_eq!(routes[0].provider, "OpenCode Zen");
+        assert_eq!(routes[0].api_method, "openai-compatible:opencode");
+        assert!(routes[0].available);
+    }
+
+    #[test]
+    fn current_compatible_profile_accepts_only_cataloged_slash_models() {
+        let guard = EnvGuard::new();
+        let model = "vendouple/gpt-5.6-sol";
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
+
+        let route = remote_current_openai_compatible_route_for_model(Some("OpenCode Zen"), model)
+            .expect("cataloged slash model should use the current compatible profile");
+        assert_eq!(route.api_method, "openai-compatible:opencode");
+        assert!(
+            remote_current_openai_compatible_route_for_model(Some("OpenCode Zen"), "unknown/model")
+                .is_none()
+        );
     }
 
     #[test]

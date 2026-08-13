@@ -20,12 +20,22 @@ impl Agent {
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
-        self.add_message(
+        self.run_once_capture_with_display_role(user_message, None)
+            .await
+    }
+
+    pub(crate) async fn run_once_capture_with_display_role(
+        &mut self,
+        user_message: &str,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<String> {
+        self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
                 cache_control: None,
             }],
+            display_role,
         );
         self.session.save()?;
         if trace_enabled() {
@@ -41,6 +51,24 @@ impl Agent {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_display_role(
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_once_streaming_mpsc_with_display_role(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
@@ -62,7 +90,7 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
-        self.append_user_context_message(user_message, images)?;
+        self.append_user_context_message_with_display_role(user_message, images, display_role)?;
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -78,6 +106,15 @@ impl Agent {
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.append_user_context_message_with_display_role(user_message, images, None)
+    }
+
+    fn append_user_context_message_with_display_role(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -95,7 +132,7 @@ impl Agent {
             ));
         }
 
-        self.add_message(Role::User, blocks);
+        self.add_message_with_display_role(Role::User, blocks, display_role);
         self.session.save()
     }
 
@@ -164,9 +201,8 @@ impl Agent {
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
-        new_session.model = Some(self.provider.model());
-        new_session.provider_key =
-            crate::session::derive_session_provider_key(self.provider.name());
+        new_session.model = Some(self.provider_model());
+        new_session.provider_key = self.provider_key_for_new_session();
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
@@ -174,6 +210,7 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
         self.provider_session_id = None;
         self.seed_compaction_from_session();
@@ -407,25 +444,29 @@ impl Agent {
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| !self.disabled_tools.contains(&tool.name));
+            tools.retain(|tool| {
+                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
+            });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
         tools
     }
 
-    /// Tailor the `selfdev` tool definition to the session mode.
+    /// Expose the `selfdev` tool only while running in self-development mode.
     ///
-    /// The registry stores a single shared `selfdev` tool with a default
-    /// (non-self-dev) schema. Self-dev sessions get the full build/test/reload
-    /// surface; every other session keeps the lightweight on-ramp surface
-    /// (`enter`, `setup`, `reload`, `status`, `find-config`). The tool stays
-    /// available in all sessions so the agent can always enter self-dev mode.
-    fn apply_selfdev_tool_surface(tools: &mut [ToolDefinition], is_canary: bool) {
+    /// The registry keeps the implementation available for self-dev sessions,
+    /// but regular agents should not spend tool-list context on an internal
+    /// development surface.
+    fn apply_selfdev_tool_surface(tools: &mut Vec<ToolDefinition>, is_canary: bool) {
+        if !is_canary {
+            tools.retain(|tool| tool.name != "selfdev");
+            return;
+        }
         for tool in tools.iter_mut() {
             if tool.name == "selfdev" {
                 tool.description =
-                    crate::tool::selfdev::SelfDevTool::description_for(is_canary).to_string();
-                tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(is_canary);
+                    crate::tool::selfdev::SelfDevTool::description_for(true).to_string();
+                tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(true);
             }
         }
     }
@@ -438,8 +479,10 @@ impl Agent {
         let allowed = self.allowed_tools.as_ref();
         registry_names.iter().any(|name| {
             name.starts_with("mcp__")
-                && allowed.map(|set| set.contains(name)).unwrap_or(true)
-                && !self.disabled_tools.contains(name)
+                && allowed
+                    .map(|set| crate::tool::tool_name_is_allowed(set, name))
+                    .unwrap_or(true)
+                && !crate::tool::tool_name_is_disabled(&self.disabled_tools, name)
                 && !locked.iter().any(|t| &t.name == name)
         })
     }
@@ -459,7 +502,9 @@ impl Agent {
         }
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| !self.disabled_tools.contains(&tool.name));
+            tools.retain(|tool| {
+                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
+            });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
         tools
@@ -540,11 +585,11 @@ impl Agent {
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
         if let Some(allowed) = self.allowed_tools.as_ref()
-            && !allowed.contains(name)
+            && !crate::tool::tool_name_is_allowed(allowed, name)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }
-        if self.disabled_tools.contains(name) {
+        if crate::tool::tool_name_is_disabled(&self.disabled_tools, name) {
             return Err(anyhow::anyhow!("Tool '{}' is disabled", name));
         }
         Ok(())
@@ -610,9 +655,11 @@ impl Agent {
                     "Failed to restore session model '{}' via '{}': {}",
                     model, model_request, e
                 ));
+            } else {
+                self.reconcile_explicit_provider_pin_route();
             }
         } else {
-            self.session.model = Some(self.provider.model());
+            self.session.model = Some(self.provider_model());
         }
         self.restore_reasoning_effort_from_session();
         let model_ms = model_start.elapsed().as_millis();

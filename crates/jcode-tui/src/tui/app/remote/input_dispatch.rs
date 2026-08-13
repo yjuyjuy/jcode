@@ -23,10 +23,11 @@ pub(in crate::tui::app) async fn begin_remote_send(
     // nonce. An empty send (a bare reminder poke) carries no nonce.
     let submission_nonce = resolve_submission_nonce(app, &content);
     let msg_id = remote
-        .send_message_with_images_reminder_and_nonce(
+        .send_message_with_images_reminder_skill_and_nonce(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
+            app.active_skill.clone(),
             submission_nonce.clone(),
         )
         .await?;

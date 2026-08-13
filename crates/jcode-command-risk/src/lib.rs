@@ -48,8 +48,8 @@ pub enum RiskLevel {
     /// Destructive but bounded (inside the working directory, recoverable via
     /// git, or under a temp dir). Run, but record it.
     Low,
-    /// Irreversible and reaches outside the working directory. Requires the
-    /// model to re-justify against the user's actual request before running.
+    /// Destructive target cannot be determined statically. Requires the model
+    /// to re-justify against the user's actual request before running.
     Confirm,
     /// Would destroy the user's home, root, or credentials. Never runs, and no
     /// amount of model justification can unlock it.
@@ -159,17 +159,30 @@ const WRAPPER_COMMANDS: &[&str] = &[
     "builtin", "exec", "setsid", "stdbuf", "chroot", "su", "watch", "eval",
 ];
 
-/// Wrapper options that consume the following word as their value.
-const WRAPPER_FLAGS_WITH_VALUES: &[&str] = &[
-    "-n",
-    "-u",
-    "-s",
-    "-c",
-    "-k",
-    "--signal",
-    "--adjustment",
-    "--user",
+/// Shell grammar words that may prefix the actual command in a segment.
+const SHELL_CONTROL_PREFIXES: &[&str] = &[
+    "then", "do", "else", "elif", "if", "while", "until", "case", "in", "select",
 ];
+
+/// Whether a wrapper option consumes the following word. Option spelling is
+/// wrapper-specific: `nice -n 10` takes a value, while `sudo -n ls` does not.
+fn wrapper_flag_takes_value(wrapper: &str, flag: &str) -> bool {
+    match wrapper {
+        "sudo" | "doas" => matches!(flag, "-u" | "--user" | "-g" | "--group" | "-C"),
+        "nice" => matches!(flag, "-n" | "--adjustment"),
+        "ionice" => matches!(
+            flag,
+            "-c" | "--class" | "-n" | "--classdata" | "-p" | "--pid"
+        ),
+        "timeout" => matches!(flag, "-s" | "--signal" | "-k" | "--kill-after"),
+        "xargs" => matches!(
+            flag,
+            "-n" | "--max-args" | "-P" | "--max-procs" | "-s" | "--max-chars"
+        ),
+        "chroot" => matches!(flag, "--userspec" | "--groups"),
+        _ => false,
+    }
+}
 
 /// Shells, which take their program from a string argument we cannot parse
 /// reliably. Treated as opaque rather than assumed safe.
@@ -205,6 +218,13 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     // verb underneath is the one we classify. Without this, any common prefix
     // is a complete bypass.
     let mut tokens = tokens;
+    while tokens.len() > 1
+        && tokens
+            .first()
+            .is_some_and(|token| SHELL_CONTROL_PREFIXES.contains(&token.text.as_str()))
+    {
+        tokens = &tokens[1..];
+    }
     let mut wrapped_by: Option<String> = None;
     loop {
         let Some(first) = tokens.first() else {
@@ -225,7 +245,7 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         if !WRAPPER_COMMANDS.contains(&name.as_str()) {
             break;
         }
-        wrapped_by = Some(name);
+        wrapped_by = Some(name.clone());
         // Skip the wrapper plus its own options and `VAR=value` assignments,
         // landing on the wrapped program. Options that take a separate value
         // (`nice -n 10`, `timeout 5`) must consume that value too.
@@ -240,7 +260,7 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
             if token.is_flag() {
                 idx += 1;
                 // A short flag known to take an argument consumes the next word.
-                if WRAPPER_FLAGS_WITH_VALUES.contains(&token.text.as_str()) && idx < rest.len() {
+                if wrapper_flag_takes_value(&name, &token.text) && idx < rest.len() {
                     idx += 1;
                 }
                 continue;
@@ -307,12 +327,26 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let mut targets: Vec<&Token> = tokens
-        .iter()
-        .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator)
-        .collect();
-    targets.extend(redirect_targets.iter().copied());
+    // Command operands are targets only when the command itself is destructive.
+    // For an otherwise harmless command with a redirect (`find ... 2>/dev/null`),
+    // treating every argument as a deletion target produces both nonsense and
+    // catastrophic false positives. In that case only the redirect destination
+    // is written.
+    let mut targets: Vec<&Token> = if triggered {
+        tokens
+            .iter()
+            .skip(1)
+            .filter(|t| !t.is_flag() && !t.is_operator)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    targets.extend(
+        redirect_targets
+            .iter()
+            .copied()
+            .filter(|target| !is_safe_redirect_sink(&target.text)),
+    );
 
     // A destructive command fed by a pipe takes its operands from the previous
     // command's output, which we cannot enumerate. `find ~ -type f | xargs rm`
@@ -343,7 +377,10 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let recursive = tokens.iter().any(|t| t.is_recursive_flag());
+    // Flags belonging to a read-only command are not deletion flags. In
+    // particular, the `r` in `find -printf` must not turn a redirect into a
+    // recursive deletion.
+    let recursive = triggered && tokens.iter().any(|t| t.is_recursive_flag());
 
     for target in targets {
         // `dd`-style `key=value` operands hide the path from a naive scan.
@@ -358,6 +395,12 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
             findings.push(finding);
         }
     }
+}
+
+/// Conventional bit buckets are safe *redirect* destinations. They remain
+/// protected when explicitly passed to a destructive command such as `rm`.
+fn is_safe_redirect_sink(raw: &str) -> bool {
+    matches!(raw, "/dev/null" | "/dev/stdout" | "/dev/stderr" | "NUL")
 }
 
 #[cfg(test)]

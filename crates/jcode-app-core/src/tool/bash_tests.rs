@@ -5,6 +5,55 @@ use crate::tool::bash::{BashTool, parse_heuristic_progress};
 use serde_json::json;
 use tokio::sync::mpsc;
 
+#[test]
+fn repository_commands_export_a_logged_cargo_function() {
+    let repo =
+        crate::build::find_repo_in_ancestors(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .expect("test runs inside the jcode repository");
+    let wrapped = wrap_repo_cargo_commands("cargo test -p demo && echo done", Some(&repo))
+        .expect("jcode repository has dev_cargo.sh");
+
+    assert!(wrapped.contains("export JCODE_DEV_CARGO_SCRIPT="));
+    assert!(wrapped.contains("JCODE_IN_DEV_CARGO=1 \"$JCODE_DEV_CARGO_SCRIPT\" \"$@\""));
+    assert!(wrapped.contains("export -f cargo"));
+    assert!(wrapped.ends_with("cargo test -p demo && echo done"));
+}
+
+#[test]
+fn cargo_routing_is_limited_to_the_jcode_repository() {
+    assert!(wrap_repo_cargo_commands("cargo test", Some(std::path::Path::new("/"))).is_none());
+    assert!(wrap_repo_cargo_commands("cargo test", None).is_none());
+}
+
+#[test]
+fn cargo_wrapper_path_is_shell_quoted() {
+    assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+}
+
+#[tokio::test]
+async fn background_command_stdin_is_null() {
+    let mut command =
+        build_shell_command("if IFS= read -r _; then printf inherited; else printf eof; fi");
+
+    // Start with a readable pipe so this test does not depend on, or modify, the
+    // test runner's process-wide stdin. Background configuration must replace it.
+    command.stdin(Stdio::piped());
+    configure_background_command_stdio(&mut command);
+
+    let child = command.spawn().expect("background command should spawn");
+    assert!(
+        child.stdin.is_none(),
+        "background commands must not retain a writable stdin pipe"
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(2), child.wait_with_output())
+        .await
+        .expect("background command should observe EOF instead of blocking")
+        .expect("background command should exit cleanly");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "eof");
+}
+
 fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
@@ -892,7 +941,14 @@ async fn bash_holds_a_risky_delete_until_justified_then_runs_it() {
     std::fs::create_dir_all(&target).expect("target");
     std::fs::write(target.join("f.txt"), "x").expect("file");
 
-    let command = format!("rm -rf {}", target.display());
+    // The concrete outside-workspace directory is allowed by policy. Its glob
+    // keeps this test focused on the Confirm path for a statically unknown set
+    // of affected files.
+    let command = format!(
+        "rm -rf {}/* && rmdir {}",
+        target.display(),
+        target.display()
+    );
     let tool = BashTool::new();
 
     // First attempt: no justification, so it is held.
