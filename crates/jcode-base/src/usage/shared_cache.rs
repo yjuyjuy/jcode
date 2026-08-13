@@ -333,9 +333,8 @@ fn usage_data_to_windows(data: &UsageData) -> Vec<CacheWindow> {
 }
 
 fn windows_to_usage_data(record: &CacheProvider) -> UsageData {
-    let ratio_of = |w: &CacheWindow| -> f32 {
-        (w.percent_used.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32
-    };
+    let ratio_of =
+        |w: &CacheWindow| -> f32 { (w.percent_used.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32 };
     let find = |id: &str| record.windows.iter().find(|w| w.id == id);
 
     let five = find("five_hour");
@@ -416,7 +415,13 @@ pub(super) fn write_anthropic(data: &UsageData) {
 // constantly. jcode's `spark` window has no `quota-axi` codex identity we can
 // reconstruct without the upstream limit id, so it stays L1-only.
 
-fn openai_window(id: &str, label: &str, kind: &str, window: &OpenAIUsageWindow, secs: u64) -> CacheWindow {
+fn openai_window(
+    id: &str,
+    label: &str,
+    kind: &str,
+    window: &OpenAIUsageWindow,
+    secs: u64,
+) -> CacheWindow {
     let percent_used = f32_percent(window.usage_ratio);
     CacheWindow {
         id: id.to_string(),
