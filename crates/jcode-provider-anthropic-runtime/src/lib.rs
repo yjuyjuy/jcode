@@ -993,8 +993,9 @@ impl AnthropicProvider {
     /// to the process-global active-account resolution when no pin is set.
     fn load_pinned_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
         match self.account_pin_snapshot() {
-            Some(label) => auth::claude::load_credentials_for_account(&label)
-                .with_context(|| format!("Failed to load Claude credentials for account '{label}'")),
+            Some(label) => auth::claude::load_credentials_for_account(&label).with_context(|| {
+                format!("Failed to load Claude credentials for account '{label}'")
+            }),
             None => auth::claude::load_credentials().context("Failed to load Claude credentials"),
         }
     }
@@ -1372,9 +1373,11 @@ impl Provider for AnthropicProvider {
                     jcode_base::logging::info(
                         "Anthropic OAuth model catalog auth failed; forcing token refresh and retrying...",
                     );
-                    let refreshed_token =
-                        force_refresh_oauth_token(Arc::clone(&self.credentials), self.account_pin_snapshot())
-                            .await?;
+                    let refreshed_token = force_refresh_oauth_token(
+                        Arc::clone(&self.credentials),
+                        self.account_pin_snapshot(),
+                    )
+                    .await?;
                     jcode_base::provider::fetch_anthropic_model_catalog_oauth(&refreshed_token)
                         .await
                 }
@@ -1684,7 +1687,9 @@ async fn run_stream_with_retries(
                             phase: jcode_message_types::ConnectionPhase::Authenticating,
                         }))
                         .await;
-                    match force_refresh_oauth_token(Arc::clone(&credentials), account_pin.clone()).await {
+                    match force_refresh_oauth_token(Arc::clone(&credentials), account_pin.clone())
+                        .await
+                    {
                         Ok(refreshed_token) => {
                             jcode_base::logging::info(
                                 "Forced OAuth token refresh succeeded, retrying request.",
@@ -1866,21 +1871,22 @@ async fn force_refresh_oauth_token(
             .filter(|t| !t.is_empty())
     };
 
-    let refresh_token = if let Some(token) = refresh_from_cache {
-        token
-    } else {
-        let loaded = match account_pin.as_deref() {
+    let refresh_token =
+        if let Some(token) = refresh_from_cache {
+            token
+        } else {
+            let loaded = match account_pin.as_deref() {
             Some(label) => auth::claude::load_credentials_for_account(label).with_context(|| {
                 format!("Failed to load Claude credentials for forced refresh of account '{label}'")
             })?,
             None => auth::claude::load_credentials()
                 .context("Failed to load Claude credentials for forced refresh")?,
         };
-        if loaded.refresh_token.is_empty() {
-            anyhow::bail!("No refresh token available in Claude credentials");
-        }
-        loaded.refresh_token
-    };
+            if loaded.refresh_token.is_empty() {
+                anyhow::bail!("No refresh token available in Claude credentials");
+            }
+            loaded.refresh_token
+        };
 
     let active_label = account_pin.unwrap_or_else(|| {
         auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label)

@@ -88,7 +88,10 @@ impl Provider for AccountAwareProvider {
     }
 }
 
-async fn make_agent(session_id: &str, model: &str) -> (Arc<AccountAwareProvider>, Arc<Mutex<Agent>>) {
+async fn make_agent(
+    session_id: &str,
+    model: &str,
+) -> (Arc<AccountAwareProvider>, Arc<Mutex<Agent>>) {
     let provider = Arc::new(AccountAwareProvider::new(model));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = Registry::new(Arc::clone(&provider_dyn)).await;
@@ -197,8 +200,7 @@ async fn switch_account_applies_to_idle_session() {
     )
     .await;
 
-    let ServerEvent::SessionSwitchResult { id, results } =
-        rx.try_recv().expect("switch result")
+    let ServerEvent::SessionSwitchResult { id, results } = rx.try_recv().expect("switch result")
     else {
         panic!("expected SessionSwitchResult");
     };
@@ -230,8 +232,7 @@ async fn switch_all_sessions_reports_each() {
     )
     .await;
 
-    let ServerEvent::SessionSwitchResult { results, .. } =
-        rx.try_recv().expect("switch result")
+    let ServerEvent::SessionSwitchResult { results, .. } = rx.try_recv().expect("switch result")
     else {
         panic!("expected SessionSwitchResult");
     };
@@ -265,8 +266,7 @@ async fn switch_account_model_crosses_together() {
     )
     .await;
 
-    let ServerEvent::SessionSwitchResult { results, .. } =
-        rx.try_recv().expect("switch result")
+    let ServerEvent::SessionSwitchResult { results, .. } = rx.try_recv().expect("switch result")
     else {
         panic!("expected SessionSwitchResult");
     };
@@ -295,8 +295,7 @@ async fn switch_unknown_session_reports_failure() {
     )
     .await;
 
-    let ServerEvent::SessionSwitchResult { results, .. } =
-        rx.try_recv().expect("switch result")
+    let ServerEvent::SessionSwitchResult { results, .. } = rx.try_recv().expect("switch result")
     else {
         panic!("expected SessionSwitchResult");
     };
@@ -322,8 +321,7 @@ async fn switch_reports_per_session_failure() {
     )
     .await;
 
-    let ServerEvent::SessionSwitchResult { results, .. } =
-        rx.try_recv().expect("switch result")
+    let ServerEvent::SessionSwitchResult { results, .. } = rx.try_recv().expect("switch result")
     else {
         panic!("expected SessionSwitchResult");
     };
@@ -358,8 +356,7 @@ async fn switch_defers_when_session_busy_and_applies_on_drain() {
     )
     .await;
 
-    let ServerEvent::SessionSwitchResult { results, .. } =
-        rx.try_recv().expect("switch result")
+    let ServerEvent::SessionSwitchResult { results, .. } = rx.try_recv().expect("switch result")
     else {
         panic!("expected SessionSwitchResult");
     };
@@ -383,5 +380,8 @@ async fn switch_defers_when_session_busy_and_applies_on_drain() {
     })
     .await
     .unwrap_or(false);
-    assert!(applied, "deferred switch should apply after the turn drains");
+    assert!(
+        applied,
+        "deferred switch should apply after the turn drains"
+    );
 }

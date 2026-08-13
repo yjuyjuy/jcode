@@ -1449,7 +1449,8 @@ fn duplicate_submission_nonce_appends_exactly_one_user_turn() -> anyhow::Result<
         let mut processing_session_id = None;
         let mut processing_task = None;
         // One tracker for the whole connection, exactly as handle_client owns it.
-        let mut message_nonce_tracker = crate::server::message_nonce_dedup::MessageNonceTracker::new();
+        let mut message_nonce_tracker =
+            crate::server::message_nonce_dedup::MessageNonceTracker::new();
         let swarm_members = Arc::new(RwLock::new(HashMap::new()));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
         let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
@@ -1522,4 +1523,3 @@ fn duplicate_submission_nonce_appends_exactly_one_user_turn() -> anyhow::Result<
         Ok::<(), anyhow::Error>(())
     })
 }
-

@@ -1585,7 +1585,10 @@ pub async fn run_session_switch_account_command(
         let session_ref = session
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Provide a session or use --all"))?;
-        Some(session::find_session_by_name_or_id(session_ref).unwrap_or_else(|_| session_ref.to_string()))
+        Some(
+            session::find_session_by_name_or_id(session_ref)
+                .unwrap_or_else(|_| session_ref.to_string()),
+        )
     };
 
     let mut client = crate::server::Client::connect().await?;

@@ -102,11 +102,7 @@ impl Agent {
     /// model, so account and model must move as one step. The model spec is
     /// applied first (which activates the target provider runtime and may cross
     /// providers), then the account is pinned on that now-active runtime.
-    pub fn switch_account_and_model(
-        &mut self,
-        label: Option<String>,
-        model: &str,
-    ) -> Result<()> {
+    pub fn switch_account_and_model(&mut self, label: Option<String>, model: &str) -> Result<()> {
         self.set_model_from_provider_state_event(
             model,
             crate::provider::ProviderModelSelectionSource::User,
