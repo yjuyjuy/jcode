@@ -388,6 +388,7 @@ impl WsTestClient {
             images: vec![],
             system_reminder: None,
             no_reply: false,
+            submission_nonce: None,
         })
         .await
     }
