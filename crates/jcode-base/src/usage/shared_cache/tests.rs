@@ -109,7 +109,10 @@ fn written_file_matches_quota_axi_schema() {
     assert_eq!(seven["kind"], "weekly");
     assert_eq!(seven["windowSeconds"], 604_800);
 
-    let opus = windows.iter().find(|w| w["id"] == "seven_day_opus").unwrap();
+    let opus = windows
+        .iter()
+        .find(|w| w["id"] == "seven_day_opus")
+        .unwrap();
     assert_eq!(opus["kind"], "model");
 
     let fable = windows.iter().find(|w| w["id"] == "model:fable").unwrap();
@@ -164,7 +167,10 @@ fn stale_record_is_ignored_on_read() {
         r#"{{"generatedAt":"{old}","schemaVersion":1,"providers":[{{"provider":"claude","label":"Claude","source":"oauth","windows":[{{"id":"five_hour","label":"session","kind":"session","percentUsed":10,"windowSeconds":18000}}],"state":{{"status":"fresh","stale":false,"refreshedAt":"{old}","sourcesTried":["oauth"]}}}}]}}"#
     );
     std::fs::write(&path, body).unwrap();
-    assert!(read_anthropic().is_none(), "stale record must not be served");
+    assert!(
+        read_anthropic().is_none(),
+        "stale record must not be served"
+    );
 }
 
 #[test]
@@ -188,7 +194,11 @@ fn wrong_schema_version_is_ignored() {
     let _env = CacheEnv::new();
     let path = cache_file_path().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, r#"{"generatedAt":"x","schemaVersion":2,"providers":[]}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"generatedAt":"x","schemaVersion":2,"providers":[]}"#,
+    )
+    .unwrap();
     assert!(read_anthropic().is_none());
 }
 
