@@ -552,6 +552,23 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
     ) -> Result<u64> {
+        self.send_message_with_images_reminder_and_nonce(content, images, system_reminder, None)
+            .await
+    }
+
+    /// Send a user message carrying an optional stable idempotency key.
+    ///
+    /// The `submission_nonce` is generated once per logical submission and
+    /// preserved across every busy/disconnect re-send of that submission so the
+    /// server can deduplicate a re-appended user turn (the duplicate-message
+    /// injection bug). Older servers ignore the field.
+    pub async fn send_message_with_images_reminder_and_nonce(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        submission_nonce: Option<String>,
+    ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
         // Reset per-call watermark before sending the next user request.
         self.reset_call_output_tokens_seen();
@@ -563,6 +580,7 @@ impl RemoteConnection {
             images,
             system_reminder,
             no_reply: false,
+            submission_nonce,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;

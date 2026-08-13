@@ -417,6 +417,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         ],
         system_reminder: Some("be concise".to_string()),
         no_reply: true,
+        submission_nonce: Some("nonce-88".to_string()),
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -426,6 +427,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         images,
         system_reminder,
         no_reply,
+        submission_nonce,
     } = decoded
     else {
         return Err(anyhow!("expected Message"));
@@ -437,6 +439,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
     assert_eq!(images[1].0, "image/jpeg");
     assert_eq!(system_reminder.as_deref(), Some("be concise"));
     assert!(no_reply);
+    assert_eq!(submission_nonce.as_deref(), Some("nonce-88"));
     Ok(())
 }
 

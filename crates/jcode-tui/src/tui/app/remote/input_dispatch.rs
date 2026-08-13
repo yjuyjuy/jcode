@@ -15,11 +15,19 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    // Resolve a STABLE idempotency nonce for this logical submission. A re-send
+    // of the same content (a rate-limit/disconnect retry still holding the
+    // pending message, or a busy-recovery re-queue that stashed the content)
+    // must reuse the ORIGINAL nonce so the server deduplicates the re-appended
+    // user turn instead of duplicating it. Genuinely new content gets a fresh
+    // nonce. An empty send (a bare reminder poke) carries no nonce.
+    let submission_nonce = resolve_submission_nonce(app, &content);
     let msg_id = remote
-        .send_message_with_images_and_reminder(
+        .send_message_with_images_reminder_and_nonce(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
+            submission_nonce.clone(),
         )
         .await?;
     app.current_message_id = Some(msg_id);
@@ -53,11 +61,54 @@ pub(in crate::tui::app) async fn begin_remote_send(
         auto_retry,
         retry_attempts,
         retry_at: None,
+        submission_nonce,
     });
     app.autoreview_after_current_turn = !is_system;
     app.autojudge_after_current_turn = !is_system;
     remote.reset_call_output_tokens_seen();
     Ok(msg_id)
+}
+
+/// Pick the submission nonce for a send of `content`.
+///
+/// Reuse the original nonce when this is a re-send of the same content (the
+/// in-flight pending message, or the busy-recovery stash), so the server treats
+/// the retry as the same logical submission and deduplicates the re-appended
+/// user turn. Fresh, non-empty content mints a new nonce. Empty content (a bare
+/// system-reminder poke) is never nonce-stamped: it appends no user turn.
+fn resolve_submission_nonce(app: &mut App, content: &str) -> Option<String> {
+    if content.is_empty() {
+        return None;
+    }
+    if let Some(pending) = app.rate_limit_pending_message.as_ref()
+        && pending.content == content
+        && let Some(nonce) = pending.submission_nonce.clone()
+    {
+        return Some(nonce);
+    }
+    // `take()` always clears the one-shot stash; the content check then decides
+    // whether it applied to this submission (a stash for different content is
+    // simply dropped).
+    if let Some((stashed_content, nonce)) = app.busy_recovered_submission.take()
+        && stashed_content == content
+    {
+        return Some(nonce);
+    }
+    Some(fresh_submission_nonce())
+}
+
+/// Generate a fresh, collision-resistant submission nonce. Mirrors the
+/// swarm-spawn `request_nonce` shape (no external uuid dependency needed):
+/// a monotonic process-local counter combined with the current time.
+fn fresh_submission_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!("msg-{now_ns}-{seq}")
 }
 
 pub(in crate::tui::app) fn restore_prepared_remote_input(
