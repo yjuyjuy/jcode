@@ -115,14 +115,31 @@ impl App {
             };
 
             if !matches!(auth_state, crate::auth::AuthState::NotConfigured) {
+                let mut saved_detail = format!(
+                    "{} - {} - {}",
+                    state_label, method_detail, validation_detail
+                );
+                if provider.id == "claude"
+                    && let Some(active) = crate::auth::claude::active_credential_source()
+                {
+                    saved_detail.push_str(&format!(
+                        " - active: {} [{}]",
+                        active.source.display_name(),
+                        active.token_prefix
+                    ));
+                    if let Some(shadow) = crate::auth::claude::external_import_shadowing_accounts()
+                    {
+                        saved_detail.push_str(&format!(
+                            " - WARNING: {} is shadowing auth.json, so /account switch will not take effect",
+                            shadow.display_name()
+                        ));
+                    }
+                }
                 items.push(AccountPickerItem::action(
                     provider.id,
                     provider.display_name,
                     "Saved auth entry",
-                    format!(
-                        "{} - {} - {}",
-                        state_label, method_detail, validation_detail
-                    ),
+                    saved_detail,
                     AccountPickerCommand::SubmitInput(format!("/account {} settings", provider.id)),
                 ));
             }

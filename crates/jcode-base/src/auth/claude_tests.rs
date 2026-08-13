@@ -546,3 +546,104 @@ impl Drop for EnvStringGuard {
         }
     }
 }
+
+#[test]
+fn token_identity_prefix_masks_long_tokens() {
+    assert_eq!(
+        token_identity_prefix("sk-ant-oat01-abcdefghijklmnop"),
+        "sk-ant-oat01..."
+    );
+    assert_eq!(token_identity_prefix("short"), "short");
+    assert_eq!(token_identity_prefix("  "), "(empty)");
+    assert_eq!(token_identity_prefix(""), "(empty)");
+}
+
+#[test]
+fn credential_source_external_classification() {
+    assert!(ClaudeCredentialSource::ClaudeCodeFile.is_external());
+    assert!(ClaudeCredentialSource::ClaudeCodeEnv.is_external());
+    assert!(ClaudeCredentialSource::OpenCode.is_external());
+    assert!(!ClaudeCredentialSource::JcodeAccount.is_external());
+}
+
+#[test]
+fn active_credential_source_uses_jcode_account_when_no_external() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+
+    let auth = JcodeAuthFile {
+        anthropic_accounts: vec![AnthropicAccount {
+            label: "claude-1".to_string(),
+            access: "acc_primary_token_value".to_string(),
+            refresh: "ref_primary".to_string(),
+            expires: 4102444800000,
+            email: None,
+            scopes: Vec::new(),
+            subscription_type: Some("max".to_string()),
+        }],
+        active_anthropic_account: Some("claude-1".to_string()),
+        anthropic: None,
+    };
+    save_auth_file(&auth).unwrap();
+
+    let active = active_credential_source().expect("a jcode account credential");
+    assert_eq!(active.source, ClaudeCredentialSource::JcodeAccount);
+    assert_eq!(active.account_label.as_deref(), Some("claude-1"));
+    assert_eq!(active.token_prefix, "acc_primary_...");
+    assert!(!active.expired);
+    // No external import, so nothing shadows the jcode accounts.
+    assert!(external_import_shadowing_accounts().is_none());
+}
+
+#[test]
+fn external_claude_code_import_shadows_jcode_accounts() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+
+    // jcode's own account exists and looks live...
+    let auth = JcodeAuthFile {
+        anthropic_accounts: vec![AnthropicAccount {
+            label: "claude-1".to_string(),
+            access: "acc_jcode_token".to_string(),
+            refresh: "ref_jcode".to_string(),
+            expires: 4102444800000,
+            email: None,
+            scopes: Vec::new(),
+            subscription_type: Some("max".to_string()),
+        }],
+        active_anthropic_account: Some("claude-1".to_string()),
+        anthropic: None,
+    };
+    save_auth_file(&auth).unwrap();
+
+    // ...but a trusted Claude Code import sits above it in resolution order.
+    let cc_path = claude_code_path().unwrap();
+    std::fs::create_dir_all(cc_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cc_path,
+        r#"{"claudeAiOauth":{"accessToken":"cc_external_token","refreshToken":"cc_ref","expiresAt":4102444800000}}"#,
+    )
+    .unwrap();
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &cc_path,
+    )
+    .unwrap();
+
+    let active = active_credential_source().expect("a credential");
+    assert_eq!(active.source, ClaudeCredentialSource::ClaudeCodeFile);
+    // External source carries no jcode account label.
+    assert!(active.account_label.is_none());
+    assert_eq!(active.token_prefix, "cc_external_...");
+
+    // The import shadows the configured jcode accounts, which is exactly the
+    // condition that makes `/account switch` a silent dead control.
+    assert_eq!(
+        external_import_shadowing_accounts(),
+        Some(ClaudeCredentialSource::ClaudeCodeFile)
+    );
+}
