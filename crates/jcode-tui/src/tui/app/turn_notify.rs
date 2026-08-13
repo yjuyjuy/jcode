@@ -8,6 +8,7 @@
 
 use super::App;
 use crate::todo::TodoItem;
+#[cfg(any(target_os = "macos", test))]
 use base64::Engine as _;
 #[cfg(target_os = "macos")]
 use std::io::Write;
@@ -131,6 +132,7 @@ fn send_originating_terminal_notification(
     false
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn notification_text(notification: &TurnNotification) -> String {
     match notification.subtitle.as_deref() {
         Some(subtitle) => format!("{}\n{}", subtitle, notification.body),
@@ -138,10 +140,12 @@ fn notification_text(notification: &TurnNotification) -> String {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn osc_safe(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_control()).collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn kitty_notification_id(session_id: &str) -> String {
     let safe: String = session_id
         .chars()
@@ -154,6 +158,7 @@ fn kitty_notification_id(session_id: &str) -> String {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn kitty_notification_sequence(notification: &TurnNotification, session_id: &str) -> String {
     // OSC 99 is Kitty's desktop-notification protocol. Notifications are tied
     // to the originating Kitty window, which is what makes click-to-focus work.
@@ -171,6 +176,7 @@ fn kitty_notification_sequence(notification: &TurnNotification, session_id: &str
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn iterm_notification_sequence(notification: &TurnNotification) -> String {
     // iTerm2's OSC 9 notification is likewise associated with its source tab.
     let text = osc_safe(&format!(

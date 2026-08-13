@@ -529,6 +529,11 @@ fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() 
 
 #[test]
 fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
+    // The empty-ish initial chat renders the "Updates" changelog banner, whose
+    // real entries carry PR references like `(#16)` that contain the substring
+    // `#1`. That would trip the batch-row numbering assertion below, so pin the
+    // changelog to empty and restore it afterwards.
+    super::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
     let state = TestState {
         display_messages: vec![DisplayMessage {
             role: "user".to_string(),
@@ -614,6 +619,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
         "live batch rows should align with completed rows in {:?}",
         rendered
     );
+    super::header::set_unseen_changelog_entries_override_for_tests(None);
 }
 
 #[test]
