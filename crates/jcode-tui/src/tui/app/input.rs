@@ -1852,6 +1852,16 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             app.set_status_notice(mode_str);
             true
         }
+        KeyCode::Char('n') => {
+            app.queue_drain_one_per_turn = !app.queue_drain_one_per_turn;
+            let mode_str = if app.queue_drain_one_per_turn {
+                "Queue drain: one message per turn"
+            } else {
+                "Queue drain: combine queued messages into one turn"
+            };
+            app.set_status_notice(mode_str);
+            true
+        }
         KeyCode::Left => {
             if app.cursor_pos > 0 {
                 app.cursor_pos = app.find_word_boundary_back();
@@ -3743,6 +3753,28 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Take the next batch of queued messages to drain as one turn, plus the
+    /// hidden `[SYSTEM: ...]` reminders that ride with it.
+    ///
+    /// Default (combine) mode takes the entire queue at once, so every queued
+    /// message is joined into a single request. One-per-turn mode
+    /// (`queue_drain_one_per_turn`) instead takes only the first queued message,
+    /// leaving the rest for later `process_queued_messages` loop iterations so
+    /// each is sent as its own turn. Either way the currently-pending hidden
+    /// reminders are taken with the batch, since a reminder is not itself a user
+    /// turn.
+    pub(super) fn take_next_queued_batch(&mut self) -> (Vec<String>, Vec<String>) {
+        if self.queue_drain_one_per_turn && !self.queued_messages.is_empty() {
+            let first = self.queued_messages.remove(0);
+            let hidden = std::mem::take(&mut self.hidden_queued_system_messages);
+            (vec![first], hidden)
+        } else {
+            let queued = std::mem::take(&mut self.queued_messages);
+            let hidden = std::mem::take(&mut self.hidden_queued_system_messages);
+            (queued, hidden)
+        }
+    }
+
     /// Process all queued messages (combined into a single request)
     /// Loops until queue is empty (in case more messages are queued during processing)
     pub(super) async fn process_queued_messages(
@@ -3753,8 +3785,13 @@ impl App {
         while !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty() {
             // Combine all currently queued messages into one, treating [SYSTEM: ...]
             // startup continuations as system reminders rather than user turns.
-            let queued_messages = std::mem::take(&mut self.queued_messages);
-            let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
+            //
+            // In one-per-turn mode, pop only the FIRST queued message this
+            // iteration (its associated hidden reminders ride with it) and let
+            // the `while` loop send the rest as their own turns. When only
+            // hidden reminders remain, or the mode is off, fall back to draining
+            // the whole batch into a single combined turn.
+            let (queued_messages, hidden_reminders) = self.take_next_queued_batch();
             let (messages, reminder, display_system_messages) =
                 super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
             let combined = messages.join("\n\n");

@@ -1522,6 +1522,10 @@ pub struct App {
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
+    // Drain queued messages one per turn instead of combining every queued
+    // message into a single request. Default seeded from `features.queue_drain_one_per_turn`;
+    // toggled per session with Ctrl+N.
+    queue_drain_one_per_turn: bool,
     // Automatically reload the remote server when a newer server binary is detected.
     auto_server_reload: bool,
     // After an interrupt, wait one redraw before auto-dispatching queued followups so
