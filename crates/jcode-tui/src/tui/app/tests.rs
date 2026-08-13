@@ -1043,7 +1043,8 @@ fn skill_invocation_with_prompt_queues_when_processing_in_queue_mode() {
     app.cursor_pos = app.input.len();
 
     // Enter routes through send_action -> Queue for a registered skill turn.
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
 
     // The skill activates now (so the drained turn carries it) and only the
     // trailing prompt is queued - the raw "/queue-skill ..." string must not be
@@ -1074,7 +1075,8 @@ fn bare_skill_activation_is_not_queued_while_processing() {
     app.input = "/bare-skill".to_string();
     app.cursor_pos = app.input.len();
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
 
     assert_eq!(app.active_skill.as_deref(), Some("bare-skill"));
     assert!(
