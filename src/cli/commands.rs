@@ -1509,6 +1509,140 @@ pub fn run_session_rename_command(
     Ok(())
 }
 
+/// One live session row for `jcode session list`.
+#[derive(Debug, Serialize)]
+struct SessionListRow {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    is_processing: bool,
+}
+
+/// `jcode session list`: enumerate live sessions with provider/account/model.
+/// Headless control surface for the account-switch orchestrator (ADR 0031).
+pub async fn run_session_list_command(json: bool) -> Result<()> {
+    let mut client = crate::server::Client::connect().await?;
+    let sessions = client.list_sessions().await?;
+
+    let rows: Vec<SessionListRow> = sessions
+        .into_iter()
+        .map(|info| SessionListRow {
+            session_id: info.session_id,
+            name: info.friendly_name,
+            provider: info.provider,
+            account: info.account,
+            model: info.model,
+            is_processing: info.is_processing,
+        })
+        .collect();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No live sessions.");
+        return Ok(());
+    }
+
+    for row in &rows {
+        let name = row.name.as_deref().unwrap_or("-");
+        let provider = row.provider.as_deref().unwrap_or("?");
+        let account = row.account.as_deref().unwrap_or("(default)");
+        let model = row.model.as_deref().unwrap_or("?");
+        let busy = if row.is_processing { " [busy]" } else { "" };
+        println!(
+            "{} ({})  provider={} account={} model={}{}",
+            row.session_id, name, provider, account, model, busy
+        );
+    }
+    Ok(())
+}
+
+/// `jcode session switch-account`: switch a live session's account, optionally
+/// with an atomic model change, per-session or all-sessions. Reports per-session
+/// success/failure. Part of the account-switch control surface (ADR 0031).
+pub async fn run_session_switch_account_command(
+    session: Option<String>,
+    all: bool,
+    account: &str,
+    model: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    // Resolve a short name / partial id to a full session id client-side so the
+    // daemon (which keys sessions by full id) receives an exact target. `--all`
+    // skips resolution and switches every live session.
+    let target: Option<String> = if all {
+        None
+    } else {
+        let session_ref = session
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Provide a session or use --all"))?;
+        Some(session::find_session_by_name_or_id(session_ref).unwrap_or_else(|_| session_ref.to_string()))
+    };
+
+    let mut client = crate::server::Client::connect().await?;
+    let results = match model {
+        Some(model) => {
+            client
+                .switch_session_account_model(target.as_deref(), account, model)
+                .await?
+        }
+        None => {
+            client
+                .switch_session_account(target.as_deref(), account)
+                .await?
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        if results.is_empty() {
+            println!("No live sessions matched.");
+        }
+        for outcome in &results {
+            let status = if outcome.ok {
+                if outcome.deferred {
+                    "ok (deferred to next turn)"
+                } else {
+                    "ok"
+                }
+            } else {
+                "failed"
+            };
+            let account = outcome.account.as_deref().unwrap_or("?");
+            let model_note = outcome
+                .model
+                .as_deref()
+                .map(|m| format!(" model={m}"))
+                .unwrap_or_default();
+            let error = outcome
+                .error
+                .as_deref()
+                .map(|e| format!(" - {e}"))
+                .unwrap_or_default();
+            println!(
+                "{}: {} account={}{}{}",
+                outcome.session_id, status, account, model_note, error
+            );
+        }
+    }
+
+    // Exit non-zero when any target failed so scripts can gate on it.
+    if results.iter().any(|outcome| !outcome.ok) {
+        anyhow::bail!("one or more sessions failed to switch");
+    }
+    Ok(())
+}
+
 async fn run_ambient_visible() -> Result<()> {
     use crate::ambient::VisibleCycleContext;
 

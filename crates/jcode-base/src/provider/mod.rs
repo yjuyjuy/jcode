@@ -2174,6 +2174,40 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn account_label(&self) -> Option<String> {
+        // Report the pin of whichever concrete runtime is active, so callers
+        // see the account the current model actually uses.
+        match self.active_provider() {
+            ActiveProvider::Claude if !self.use_claude_cli => {
+                self.anthropic_provider().and_then(|a| a.account_label())
+            }
+            ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.account_label()),
+            _ => None,
+        }
+    }
+
+    fn set_account_label(&self, label: Option<String>) -> Result<()> {
+        // Forward to the active concrete runtime. Only Anthropic and OpenAI
+        // support multiple accounts today; other providers reject a non-None
+        // label via the trait default.
+        match self.active_provider() {
+            ActiveProvider::Claude if !self.use_claude_cli => self
+                .anthropic_provider()
+                .ok_or_else(|| anyhow::anyhow!("Anthropic provider not available"))?
+                .set_account_label(label),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
+                .set_account_label(label),
+            _ => match label {
+                None => Ok(()),
+                Some(label) => Err(anyhow::anyhow!(
+                    "Account switching is not supported for the active provider (requested '{label}')"
+                )),
+            },
+        }
+    }
+
     fn handles_tools_internally(&self) -> bool {
         match self.active_provider() {
             ActiveProvider::Claude => {
