@@ -926,6 +926,7 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        submission_nonce: None,
     });
     app.streaming.streaming_text = "partial response being streamed".to_string();
 

@@ -909,6 +909,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 content: "do not start during reload".to_string(),
                 images: Vec::new(),
                 system_reminder: None,
+                submission_nonce: None,
             },
             "session_guard",
             &mut ProcessingState {
@@ -917,6 +918,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 session_id: &mut processing_session_id,
                 task: &mut processing_task,
             },
+            &mut crate::server::message_nonce_dedup::MessageNonceTracker::new(),
             &agent,
             &client_event_tx,
             &processing_done_tx,
@@ -1009,6 +1011,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             content: "stream to every attachment".to_string(),
             images: Vec::new(),
             system_reminder: None,
+            submission_nonce: None,
         },
         session_id,
         &mut ProcessingState {
@@ -1017,6 +1020,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             session_id: &mut processing_session_id,
             task: &mut processing_task,
         },
+        &mut crate::server::message_nonce_dedup::MessageNonceTracker::new(),
         &agent,
         &origin_tx,
         &processing_done_tx,
@@ -1133,6 +1137,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 content: "continue after reload".to_string(),
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
+                submission_nonce: None,
             },
             session_id,
             &mut ProcessingState {
@@ -1141,6 +1146,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 session_id: &mut processing_session_id,
                 task: &mut processing_task,
             },
+            &mut crate::server::message_nonce_dedup::MessageNonceTracker::new(),
             &agent,
             &client_event_tx,
             &processing_done_tx,
@@ -1232,6 +1238,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     content: format!("do not start {session_id} during reload"),
                     images: Vec::new(),
                     system_reminder: None,
+                    submission_nonce: None,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -1240,6 +1247,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     session_id: &mut processing_session_id,
                     task: &mut processing_task,
                 },
+                &mut crate::server::message_nonce_dedup::MessageNonceTracker::new(),
                 &agent,
                 &client_event_tx,
                 &processing_done_tx,
@@ -1407,4 +1415,111 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 
 fn decode_request_or_event(line: &str) -> ServerEvent {
     serde_json::from_str(line.trim()).expect("decode server event")
+}
+
+#[test]
+fn duplicate_submission_nonce_appends_exactly_one_user_turn() -> anyhow::Result<()> {
+    // Regression for the duplicate-message-injection bug: a client that re-sends
+    // the same logical submission across a busy race (issue #391 recovery
+    // amplifier) must not add a second identical user turn. The server records
+    // the accepted submission nonce and treats any later same-nonce send as a
+    // duplicate, so the transcript keeps exactly one appended user turn.
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let session_id = "session_duplicate_nonce_dedup";
+    let nonce = "submission-nonce-abc";
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.model = Some("complete-immediately".to_string());
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+
+        let messages_before = agent.lock().await.message_count();
+
+        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let mut client_is_processing = false;
+        let mut processing_message_id = None;
+        let mut processing_session_id = None;
+        let mut processing_task = None;
+        // One tracker for the whole connection, exactly as handle_client owns it.
+        let mut message_nonce_tracker =
+            crate::server::message_nonce_dedup::MessageNonceTracker::new();
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        // The nonce is fresh: the first send is accepted and appended.
+        assert!(!message_nonce_tracker.is_duplicate(Some(nonce)));
+        start_processing_message(
+            ProcessingMessage {
+                id: 1,
+                content: "run the same submission".to_string(),
+                images: Vec::new(),
+                system_reminder: None,
+                submission_nonce: Some(nonce.to_string()),
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &mut message_nonce_tracker,
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+
+        // Drain the accepted turn to completion so its user turn is appended.
+        let (done_id, result, _report) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                .await
+                .expect("processing task should finish")
+                .expect("processing task should report completion");
+        assert_eq!(done_id, 1);
+        result?;
+        if let Some(handle) = processing_task.take() {
+            handle.await.expect("processing task join");
+        }
+
+        let messages_after_first = agent.lock().await.message_count();
+        assert!(
+            messages_after_first > messages_before,
+            "the accepted submission should append its user turn to history"
+        );
+
+        // The same nonce re-sent (the busy-recovery amplifier) is now a
+        // duplicate: handle_client short-circuits it with a Done and never calls
+        // start_processing_message again, so no second turn is appended.
+        assert!(
+            message_nonce_tracker.is_duplicate(Some(nonce)),
+            "a re-sent submission carrying the accepted nonce must be detected as a duplicate"
+        );
+        let messages_after_duplicate = agent.lock().await.message_count();
+        assert_eq!(
+            messages_after_duplicate, messages_after_first,
+            "a duplicate-nonce re-send must not append another user turn"
+        );
+
+        Ok::<(), anyhow::Error>(())
+    })
 }

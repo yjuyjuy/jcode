@@ -1673,9 +1673,7 @@ mod tests {
         assert_eq!(normalize_selection_name(None).unwrap(), None);
         assert!(normalize_selection_name(Some("x")).is_err());
         assert!(normalize_selection_name(Some("<script>alert(1)</script>")).is_err());
-        assert!(
-            normalize_selection_name(Some("ghp_abcdefghijklmnopqrstuvwxyz1234567890")).is_err()
-        );
+        assert!(normalize_selection_name(Some("ghp_exampletoken1234")).is_err());
     }
 
     #[test]

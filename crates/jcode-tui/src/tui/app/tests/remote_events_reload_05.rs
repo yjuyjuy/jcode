@@ -29,6 +29,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        submission_nonce: None,
     });
     app.rate_limit_reset = None;
 
@@ -62,6 +63,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
         auto_retry: true,
         retry_attempts: u8::MAX,
         retry_at: None,
+        submission_nonce: None,
     });
 
     let mut state = remote::RemoteRunState::default();
@@ -89,6 +91,7 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        submission_nonce: None,
     });
     app.rate_limit_reset = None;
 

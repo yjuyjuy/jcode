@@ -49,6 +49,15 @@ pub enum Request {
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]
         no_reply: bool,
+        /// Stable client-generated idempotency key for this logical submission,
+        /// preserved across every busy/disconnect re-send of the same submission
+        /// (not regenerated on retry). The server records recently-accepted
+        /// nonces per connection and acknowledges a duplicate without appending
+        /// a second identical user turn. Backward-compatible: absent on older
+        /// clients, which keep the pre-dedup behavior. Mirrors the existing
+        /// swarm-spawn `request_nonce` dedup pattern.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        submission_nonce: Option<String>,
     },
 
     /// Cancel current generation
