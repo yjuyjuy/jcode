@@ -597,6 +597,11 @@ impl AcpRuntime {
                 images,
                 system_reminder: None,
                 no_reply: false,
+                // Fresh per-prompt idempotency key. The ACP bridge sends each
+                // prompt exactly once, so a unique nonce simply opts this path
+                // into the server's duplicate-submission guard without changing
+                // behavior.
+                submission_nonce: Some(format!("acp-{}-{}", session.session_id, prompt_id)),
             })
             .await;
         if let Err(err) = send_result {

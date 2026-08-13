@@ -23,12 +23,16 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         } else {
             None
         };
+        let submission_nonce = rng
+            .random_bool(0.5)
+            .then(|| format!("nonce-{}", sample_ascii(&mut rng, 8)));
         let req = Request::Message {
             id,
             content: content.clone(),
             images: images.clone(),
             system_reminder: system_reminder.clone(),
             no_reply: rng.random_bool(0.5),
+            submission_nonce: submission_nonce.clone(),
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Message {
@@ -37,6 +41,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             images: decoded_images,
             system_reminder: decoded_system_reminder,
             no_reply: decoded_no_reply,
+            submission_nonce: decoded_submission_nonce,
         } = decoded
         else {
             return Err(anyhow!("expected randomized Message"));
@@ -45,6 +50,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         assert_eq!(decoded_content, content);
         assert_eq!(decoded_images, images);
         assert_eq!(decoded_system_reminder, system_reminder);
+        assert_eq!(decoded_submission_nonce, submission_nonce);
         assert_eq!(decoded_no_reply, matches!(req, Request::Message { no_reply: true, .. }));
     }
 

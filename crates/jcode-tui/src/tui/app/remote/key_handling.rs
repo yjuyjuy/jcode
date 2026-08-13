@@ -469,11 +469,6 @@ async fn handle_remote_key_internal(
         let alt_code = macos_option_shortcut.map(KeyCode::Char).unwrap_or(code);
         match alt_code {
             KeyCode::Char('b') => {
-                if matches!(app.status, ProcessingStatus::RunningTool(_)) {
-                    remote.background_tool().await?;
-                    app.set_status_notice("Moving tool to background...");
-                    return Ok(());
-                }
                 app.cursor_pos = app.find_word_boundary_back();
                 return Ok(());
             }
@@ -611,11 +606,6 @@ async fn handle_remote_key_internal(
         }
         match code {
             KeyCode::Char('b') => {
-                if matches!(app.status, ProcessingStatus::RunningTool(_)) {
-                    remote.background_tool().await?;
-                    app.set_status_notice("Moving tool to background...");
-                    return Ok(());
-                }
                 if app.cursor_pos > 0 {
                     app.cursor_pos = app.find_word_boundary_back();
                 }
