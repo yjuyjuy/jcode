@@ -11,6 +11,7 @@ mod model;
 mod openai_helpers;
 mod pace;
 mod provider_fetch;
+mod shared_cache;
 pub use accessors::*;
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
@@ -57,9 +58,25 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, (Instant, ProviderUsage)>>,
 > = std::sync::OnceLock::new();
 
-async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
+async fn fetch_anthropic_usage_data(
+    access_token: String,
+    cache_key: String,
+    l2_label: Option<&str>,
+) -> Result<UsageData> {
+    // L1 (per-session, in-memory) is checked first.
     if let Some(cached) = cached_anthropic_usage(&cache_key) {
         return Ok(cached);
+    }
+
+    // L2 (host-wide, shared with quota-axi) read-through: only for the active
+    // account, whose usage every session polls constantly. A fresh shared record
+    // lets N sessions serve from one host-wide fetch instead of each hitting the
+    // endpoint. Warms L1 so subsequent reads stay in-process.
+    if l2_label.is_some_and(shared_cache::anthropic_account_is_active)
+        && let Some(shared) = shared_cache::read_anthropic()
+    {
+        store_anthropic_usage(cache_key, shared.clone());
+        return Ok(shared);
     }
 
     let client = crate::provider::shared_http_client();
@@ -147,6 +164,12 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     };
 
     store_anthropic_usage(cache_key, usage.clone());
+    // L2 write-through: a successful active-account fetch is published to the
+    // host-wide shared file so other sessions (and quota-axi) reuse it. Only
+    // successful data is written; error/backoff state stays in L1.
+    if l2_label.is_some_and(shared_cache::anthropic_account_is_active) {
+        shared_cache::write_anthropic(&usage);
+    }
     Ok(usage)
 }
 

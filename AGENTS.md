@@ -41,3 +41,17 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Subscription usage cache
+
+Usage fetching lives in `crates/jcode-base/src/usage/`.
+Two layers back the Anthropic and OpenAI usage fetchers: an in-memory per-session cache (L1, `usage/cache.rs`) and a host-wide on-disk cache shared with the `quota-axi` tool (L2, `usage/shared_cache.rs`).
+L2 is only read/written for the host-active account and only for successful fetches, so all error and 429 backoff stays owned by L1.
+The shared file (`${XDG_CACHE_HOME:-~/.cache}/quota-axi/quotas.json`, `schemaVersion` 1) must byte-match `quota-axi`; its window-identity contract is authoritative, so verify against that tool before changing the on-disk shape.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
