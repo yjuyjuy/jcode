@@ -4,15 +4,15 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
-    CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
-    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
-    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
-    MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, OverscrollStatusMode,
-    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
-    SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
-    WebSearchConfig, WebSearchEngine,
+    AccountSelectionStrategy, AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig,
+    AutoReviewConfig, CompactionConfig, CompactionMode, CrossProviderFailoverMode,
+    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
+    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
+    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, NamedProviderAuth,
+    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
+    NotificationsConfig, OverscrollStatusMode, PowerConfig, ProviderConfig, ReasoningDisplayMode,
+    SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
+    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -32,6 +32,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_ACP_PROFILE",
     "JCODE_ACP_TOOL_PROFILE",
     "JCODE_ACTIVE_SESSIONS_MANAGER",
+    "JCODE_ACCOUNT_PRIORITY",
+    "JCODE_ACCOUNT_SELECTION_STRATEGY",
     "JCODE_PACE_AWARE_ACCOUNT_BALANCING",
     "JCODE_EXTERNAL_SESSIONS",
     "JCODE_AMBIENT_ENABLED",

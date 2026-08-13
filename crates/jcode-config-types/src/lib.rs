@@ -347,6 +347,48 @@ impl CrossProviderFailoverMode {
     }
 }
 
+/// How jcode chooses among multiple same-provider accounts.
+///
+/// This is orthogonal to failover: it selects *which* account is preferred
+/// while more than one is live, not what happens once one dies.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountSelectionStrategy {
+    /// Consume-first pace balancing: proactively burn the soonest-resetting
+    /// weekly quota first, with hysteresis and a cooldown. This is the shipped
+    /// default and is additionally gated by `pace_aware_account_balancing`.
+    #[default]
+    Pace,
+    /// Ranked-list priority: always prefer the highest-priority live account,
+    /// fall back down the list when it is capped, and return to it when its
+    /// window resets. The order is `account_priority`, keyed on stable identity
+    /// (account email or a stable label), never the positional `claude-1`
+    /// numbering. Opt-in.
+    Priority,
+    /// No proactive rebalancing at all: switch accounts only once the active one
+    /// is fully exhausted (both windows maxed).
+    ExhaustionOnly,
+}
+
+impl AccountSelectionStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pace => "pace",
+            Self::Priority => "priority",
+            Self::ExhaustionOnly => "exhaustion-only",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pace" | "consume-first" => Some(Self::Pace),
+            "priority" => Some(Self::Priority),
+            "exhaustion-only" | "exhaustion" | "off" => Some(Self::ExhaustionOnly),
+            _ => None,
+        }
+    }
+}
+
 /// Compaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1208,6 +1250,20 @@ pub struct ProviderConfig {
     /// when more capacity will be needed soon. Off leaves the exhaustion-only
     /// behavior unchanged.
     pub pace_aware_account_balancing: bool,
+    /// How jcode picks among multiple same-provider accounts while more than one
+    /// is live. `pace` (default) keeps the consume-first balancing above;
+    /// `priority` prefers the highest-ranked live account from `account_priority`
+    /// (return-on-reset, fall-back-on-cap); `exhaustion-only` disables all
+    /// proactive rebalancing. `priority` is opt-in so the shipped default is
+    /// unchanged.
+    pub account_selection_strategy: AccountSelectionStrategy,
+    /// Ranked account priority for the `priority` strategy, most-preferred first.
+    /// Each entry matches an account by STABLE identity - its email
+    /// (`AnthropicAccount.email`) or a stable user label - never the positional
+    /// `claude-1`/`claude-2` numbering, so relabeling accounts never silently
+    /// reorders priority. Empty leaves `priority` with nothing to rank, so it
+    /// falls back to exhaustion-only behavior.
+    pub account_priority: Vec<String>,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1239,6 +1295,8 @@ impl Default for ProviderConfig {
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             pace_aware_account_balancing: true,
+            account_selection_strategy: AccountSelectionStrategy::default(),
+            account_priority: Vec::new(),
             copilot_premium: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,

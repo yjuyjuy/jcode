@@ -372,6 +372,20 @@ preserve_reasoning_context = true
 # and pace balancing keeps rebalancing, instead of only selecting at startup and
 # explicit switch. Only overridable via the env var JCODE_ACCOUNT_REEVAL_INTERVAL_SECS
 # (default 60; 0 disables poll-driven re-evaluation).
+# How to pick among multiple same-provider accounts while more than one is live.
+# "pace" (default) = the consume-first pace balancing above (also gated by
+#   pace_aware_account_balancing).
+# "priority" = always prefer the highest-ranked live account in account_priority,
+#   fall back down the list when it is capped, and return to it when its window
+#   resets. Opt-in; leaves the shipped default unchanged.
+# "exhaustion-only" = no proactive rebalancing; switch only once an account is
+#   fully exhausted. Overridable via JCODE_ACCOUNT_SELECTION_STRATEGY.
+# account_selection_strategy = "priority"
+# Ranked account priority for the "priority" strategy, most-preferred first.
+# Match each account by STABLE identity - its login email or a stable label -
+# never the positional claude-1/claude-2 numbering, so relabeling accounts never
+# silently reorders priority. Overridable via JCODE_ACCOUNT_PRIORITY (comma-separated).
+# account_priority = ["primary@example.com", "backup@example.com"]
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
