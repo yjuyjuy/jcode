@@ -549,7 +549,10 @@ impl Drop for EnvStringGuard {
 
 #[test]
 fn token_identity_prefix_masks_long_tokens() {
-    assert_eq!(token_identity_prefix("sk-ant-oat01-abcdefghijklmnop"), "sk-ant-oat01...");
+    assert_eq!(
+        token_identity_prefix("sk-ant-oat01-abcdefghijklmnop"),
+        "sk-ant-oat01..."
+    );
     assert_eq!(token_identity_prefix("short"), "short");
     assert_eq!(token_identity_prefix("  "), "(empty)");
     assert_eq!(token_identity_prefix(""), "(empty)");

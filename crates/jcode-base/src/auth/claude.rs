@@ -694,7 +694,9 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     match resolve_active_credential() {
         Some((_source, creds, _expired)) => Ok(creds),
         None => {
-            anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)")
+            anyhow::bail!(
+                "No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)"
+            )
         }
     }
 }
