@@ -598,13 +598,12 @@ impl MultiProvider {
     /// the exhaustion-only failover path as the only mover.
     ///
     /// [`account_selection_strategy`]: jcode_config_types::ProviderConfig::account_selection_strategy
-    fn maybe_rebalance(
-        &self,
-        provider: ActiveProvider,
-        probe: &crate::usage::AccountUsageProbe,
-    ) {
+    fn maybe_rebalance(&self, provider: ActiveProvider, probe: &crate::usage::AccountUsageProbe) {
         use jcode_config_types::AccountSelectionStrategy;
-        match crate::config::Config::load().provider.account_selection_strategy {
+        match crate::config::Config::load()
+            .provider
+            .account_selection_strategy
+        {
             AccountSelectionStrategy::Pace => self.maybe_pace_balance(provider, probe),
             AccountSelectionStrategy::Priority => self.maybe_priority_select(provider, probe),
             AccountSelectionStrategy::ExhaustionOnly => {}
@@ -633,7 +632,10 @@ impl MultiProvider {
             return;
         }
 
-        let priority_order = crate::config::Config::load().provider.account_priority.clone();
+        let priority_order = crate::config::Config::load()
+            .provider
+            .account_priority
+            .clone();
         if priority_order.is_empty() {
             // Nothing to rank: leave the exhaustion-only failover as the mover.
             return;

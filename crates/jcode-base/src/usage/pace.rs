@@ -545,11 +545,7 @@ pub fn select_priority_target(
                 to: target.label.clone(),
             },
             None => {
-                if accounts
-                    .iter()
-                    .filter(|a| !a.errored)
-                    .all(|a| a.exhausted)
-                {
+                if accounts.iter().filter(|a| !a.errored).all(|a| a.exhausted) {
                     BalanceDecision::AllExhausted
                 } else {
                     BalanceDecision::Blocked("no-live-priority-candidate")

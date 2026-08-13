@@ -590,7 +590,10 @@ fn priority_stays_on_highest_when_current_and_healthy() {
         BalanceState::default(),
         now,
     );
-    assert_eq!(decision, BalanceDecision::Stay("priority-current-preferred"));
+    assert_eq!(
+        decision,
+        BalanceDecision::Stay("priority-current-preferred")
+    );
 }
 
 #[test]
@@ -653,7 +656,10 @@ fn priority_does_not_flap_back_when_higher_hovers_at_cap() {
         BalanceState::default(),
         now,
     );
-    assert_eq!(decision, BalanceDecision::Stay("priority-current-preferred"));
+    assert_eq!(
+        decision,
+        BalanceDecision::Stay("priority-current-preferred")
+    );
 }
 
 #[test]
@@ -807,5 +813,8 @@ fn priority_empty_order_stays_on_current_when_healthy() {
     );
     // With no ranking, both accounts tie at rank usize::MAX; current healthy =>
     // stay. (The startup wiring also guards against an empty list before calling.)
-    assert_eq!(decision, BalanceDecision::Stay("priority-current-preferred"));
+    assert_eq!(
+        decision,
+        BalanceDecision::Stay("priority-current-preferred")
+    );
 }
