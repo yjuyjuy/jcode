@@ -5,7 +5,7 @@
 //!
 //! Automatically selects the best available backend:
 //! - OpenAI (gpt-5.6-luna, reasoning=none) if Codex credentials are available
-//! - Claude (claude-haiku-4-5-20241022) if Claude credentials are available
+//! - Claude (claude-haiku-4-5) if Claude credentials are available
 
 use crate::auth;
 use anyhow::{Context, Result};
@@ -19,7 +19,7 @@ const SIDECAR_OPENAI_REASONING: &str = "none";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
-/// Fast/cheap Claude model used when only Claude credentials are available.
+/// Fast/cheap Claude model used when only Claude credentials are available. The dated `claude-haiku-4-5-20251001` is a real Anthropic snapshot, normalized to the bare canonical id by auth lifecycle routing; it supersedes the fork's bare-id fix (#25), which only existed because the prior `-20241022` form was invalid (that date is claude-3-5-haiku) and 404d.
 const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// OpenAI Responses API
