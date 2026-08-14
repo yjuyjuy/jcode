@@ -189,6 +189,7 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
 
     match result {
         Ok(extracted) if !extracted.is_empty() => {
+            crate::memory::clear_extraction_health();
             let mut stored_count = 0;
 
             for mem in &extracted {
@@ -217,12 +218,14 @@ async fn run_final_extraction(transcript: String, session_id: String, working_di
             }
         }
         Ok(_) => {
+            crate::memory::clear_extraction_health();
             crate::logging::info(&format!(
                 "Final extraction for session {}: no memories extracted",
                 session_id
             ));
         }
         Err(e) => {
+            crate::memory::record_extraction_failure(&e.to_string());
             crate::logging::info(&format!(
                 "Final extraction for session {} failed: {}",
                 session_id, e
@@ -989,6 +992,7 @@ impl MemoryAgent {
                 .await
             {
                 Ok(extracted) if !extracted.is_empty() => {
+                    memory::clear_extraction_health();
                     let mut stored_count = 0;
                     let mut stored_ids: Vec<String> = Vec::new();
                     let mut known_ids: Vec<String> = Vec::new();
@@ -1177,9 +1181,11 @@ impl MemoryAgent {
                 }
                 Ok(_) => {
                     // No memories extracted - that's fine
+                    memory::clear_extraction_health();
                     memory::set_state(MemoryState::Idle);
                 }
                 Err(e) => {
+                    memory::record_extraction_failure(&e.to_string());
                     crate::logging::info(&format!("Incremental extraction failed: {}", e));
                     memory::add_event(MemoryEventKind::Error {
                         message: e.to_string(),
