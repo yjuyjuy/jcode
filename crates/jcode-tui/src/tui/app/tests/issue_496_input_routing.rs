@@ -75,6 +75,7 @@ fn test_cancel_and_stop_clear_pending_rate_limit_retry() {
             auto_retry: false,
             retry_attempts: 0,
             retry_at: Some(retry_at),
+            submission_nonce: None,
         });
 
         app.set_input_for_test(command);
