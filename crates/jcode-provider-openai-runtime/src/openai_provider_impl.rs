@@ -1211,7 +1211,18 @@ impl Provider for OpenAIProvider {
             persistent_ws: Arc::new(Mutex::new(None)),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::clone(&self.browser_only),
+            // Forks share the credential slot, so they share the account pin
+            // that decides which account those credentials belong to.
+            account_pin: Arc::clone(&self.account_pin),
         })
+    }
+
+    fn account_label(&self) -> Option<String> {
+        self.account_pin_snapshot()
+    }
+
+    fn set_account_label(&self, label: Option<String>) -> Result<()> {
+        self.set_account_pin(label)
     }
 
     async fn invalidate_credentials(&self) {

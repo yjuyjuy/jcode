@@ -378,6 +378,11 @@ pub struct AnthropicProvider {
     max_tokens_override: Option<u32>,
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
+    /// Per-instance account pin. When `Some`, this session loads and refreshes
+    /// credentials for this specific account label instead of following the
+    /// process-global active account. This is what lets one live session switch
+    /// accounts without disturbing its siblings (ADR 0031 control surface).
+    account_pin: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl AnthropicProvider {
@@ -530,6 +535,7 @@ impl AnthropicProvider {
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            account_pin: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -851,8 +857,7 @@ impl AnthropicProvider {
         }
 
         // Load fresh credentials or refresh expired ones
-        let fresh_creds =
-            auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+        let fresh_creds = self.load_pinned_credentials()?;
 
         if !fresh_creds.scopes.is_empty()
             && !oauth::claude_scopes_have_inference(&fresh_creds.scopes)
@@ -884,8 +889,7 @@ impl AnthropicProvider {
                 "OAuth token expired or expiring soon, attempting refresh...",
             );
 
-            let active_label = auth::claude::active_account_label()
-                .unwrap_or_else(auth::claude::primary_account_label);
+            let active_label = self.refresh_account_label();
             match oauth::refresh_claude_tokens_for_account(
                 &fresh_creds.refresh_token,
                 &active_label,
@@ -942,7 +946,7 @@ impl AnthropicProvider {
                 load_anthropic_api_key()?;
             }
             AnthropicCredentialMode::OAuth => {
-                auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+                self.load_pinned_credentials()?;
             }
         }
         let mut mode_guard = self.credential_mode.try_write().map_err(|_| {
@@ -975,6 +979,33 @@ impl AnthropicProvider {
             .try_read()
             .map(|mode| *mode)
             .unwrap_or(AnthropicCredentialMode::Auto)
+    }
+
+    /// Current per-instance account pin, if any.
+    fn account_pin_snapshot(&self) -> Option<String> {
+        self.account_pin
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Load OAuth credentials honoring this instance's account pin. Falls back
+    /// to the process-global active-account resolution when no pin is set.
+    fn load_pinned_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
+        match self.account_pin_snapshot() {
+            Some(label) => auth::claude::load_credentials_for_account(&label).with_context(|| {
+                format!("Failed to load Claude credentials for account '{label}'")
+            }),
+            None => auth::claude::load_credentials().context("Failed to load Claude credentials"),
+        }
+    }
+
+    /// The account label used for token refresh: the instance pin when set,
+    /// otherwise the process-global active account.
+    fn refresh_account_label(&self) -> String {
+        self.account_pin_snapshot().unwrap_or_else(|| {
+            auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label)
+        })
     }
 
     /// Convert our Message type to Anthropic API format
@@ -1122,6 +1153,7 @@ impl Provider for AnthropicProvider {
         let credentials = Arc::clone(&self.credentials);
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
+        let account_pin = self.account_pin_snapshot();
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
@@ -1145,6 +1177,7 @@ impl Provider for AnthropicProvider {
                 model,
                 oauth_session_id,
                 model_state,
+                account_pin,
             )
             .await;
         });
@@ -1340,8 +1373,11 @@ impl Provider for AnthropicProvider {
                     jcode_base::logging::info(
                         "Anthropic OAuth model catalog auth failed; forcing token refresh and retrying...",
                     );
-                    let refreshed_token =
-                        force_refresh_oauth_token(Arc::clone(&self.credentials)).await?;
+                    let refreshed_token = force_refresh_oauth_token(
+                        Arc::clone(&self.credentials),
+                        self.account_pin_snapshot(),
+                    )
+                    .await?;
                     jcode_base::provider::fetch_anthropic_model_catalog_oauth(&refreshed_token)
                         .await
                 }
@@ -1401,12 +1437,44 @@ impl Provider for AnthropicProvider {
             oauth_preflight_done: Arc::new(AtomicBool::new(
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
+            // A fork gets its own account pin lock seeded with the current pin,
+            // so later per-session switches on the fork or original do not leak
+            // into each other.
+            account_pin: Arc::new(std::sync::RwLock::new(self.account_pin_snapshot())),
         })
     }
 
     async fn invalidate_credentials(&self) {
         let mut cached = self.credentials.write().await;
         *cached = None;
+    }
+
+    fn account_label(&self) -> Option<String> {
+        self.account_pin_snapshot()
+    }
+
+    fn set_account_label(&self, label: Option<String>) -> Result<()> {
+        // Refuse to pin to an account that does not exist so the caller gets a
+        // clear failure instead of silently falling back to another account on
+        // the next credential load.
+        if let Some(ref label) = label {
+            auth::claude::load_credentials_for_account(label)
+                .with_context(|| format!("Cannot pin Anthropic account '{label}'"))?;
+        }
+        {
+            let mut guard = self
+                .account_pin
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = label;
+        }
+        // Drop cached credentials so the next request loads the pinned account's
+        // token. An in-flight request already holds its own token, so this never
+        // disturbs a turn already streaming.
+        if let Ok(mut cached) = self.credentials.try_write() {
+            *cached = None;
+        }
+        Ok(())
     }
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
@@ -1486,6 +1554,7 @@ impl Provider for AnthropicProvider {
         let credentials = Arc::clone(&self.credentials);
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
+        let account_pin = self.account_pin_snapshot();
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
@@ -1508,6 +1577,7 @@ impl Provider for AnthropicProvider {
                 model,
                 oauth_session_id,
                 model_state,
+                account_pin,
             )
             .await;
         });
@@ -1530,6 +1600,7 @@ async fn run_stream_with_retries(
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
+    account_pin: Option<String>,
 ) {
     let mut token = initial_token;
     let mut last_error = None;
@@ -1616,7 +1687,9 @@ async fn run_stream_with_retries(
                             phase: jcode_message_types::ConnectionPhase::Authenticating,
                         }))
                         .await;
-                    match force_refresh_oauth_token(Arc::clone(&credentials)).await {
+                    match force_refresh_oauth_token(Arc::clone(&credentials), account_pin.clone())
+                        .await
+                    {
                         Ok(refreshed_token) => {
                             jcode_base::logging::info(
                                 "Forced OAuth token refresh succeeded, retrying request.",
@@ -1788,6 +1861,7 @@ async fn run_stream_with_retries(
 
 async fn force_refresh_oauth_token(
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    account_pin: Option<String>,
 ) -> Result<String> {
     let refresh_from_cache = {
         let cached = credentials.read().await;
@@ -1797,19 +1871,26 @@ async fn force_refresh_oauth_token(
             .filter(|t| !t.is_empty())
     };
 
-    let refresh_token = if let Some(token) = refresh_from_cache {
-        token
-    } else {
-        let loaded = auth::claude::load_credentials()
-            .context("Failed to load Claude credentials for forced refresh")?;
-        if loaded.refresh_token.is_empty() {
-            anyhow::bail!("No refresh token available in Claude credentials");
-        }
-        loaded.refresh_token
-    };
+    let refresh_token =
+        if let Some(token) = refresh_from_cache {
+            token
+        } else {
+            let loaded = match account_pin.as_deref() {
+            Some(label) => auth::claude::load_credentials_for_account(label).with_context(|| {
+                format!("Failed to load Claude credentials for forced refresh of account '{label}'")
+            })?,
+            None => auth::claude::load_credentials()
+                .context("Failed to load Claude credentials for forced refresh")?,
+        };
+            if loaded.refresh_token.is_empty() {
+                anyhow::bail!("No refresh token available in Claude credentials");
+            }
+            loaded.refresh_token
+        };
 
-    let active_label =
-        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    let active_label = account_pin.unwrap_or_else(|| {
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label)
+    });
     let refreshed =
         match oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label).await {
             Ok(refreshed) => refreshed,
