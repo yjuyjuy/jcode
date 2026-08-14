@@ -5,7 +5,7 @@
 //!
 //! Automatically selects the best available backend:
 //! - OpenAI (gpt-5.6-luna, reasoning=none) if Codex credentials are available
-//! - Claude (claude-haiku-4-5-20241022) if Claude credentials are available
+//! - Claude (claude-haiku-4-5) if Claude credentials are available
 
 use crate::auth;
 use anyhow::{Context, Result};
@@ -19,7 +19,12 @@ const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
 /// Fast/cheap Claude model used when only Claude credentials are available.
-const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
+///
+/// Uses the bare canonical id (no date suffix). The dated form
+/// `claude-haiku-4-5-20241022` does not exist on the Anthropic API - that date
+/// belongs to `claude-3-5-haiku` - so it 404s every call and the memory sidecar
+/// never runs. The catalog and routing use the bare id everywhere; match it.
+const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5";
 
 /// OpenAI Responses API
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
