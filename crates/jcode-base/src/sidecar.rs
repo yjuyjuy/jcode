@@ -18,12 +18,7 @@ const SIDECAR_OPENAI_REASONING: &str = "none";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
-/// Fast/cheap Claude model used when only Claude credentials are available.
-///
-/// Uses the bare canonical id (no date suffix). The dated form
-/// `claude-haiku-4-5-20241022` does not exist on the Anthropic API - that date
-/// belongs to `claude-3-5-haiku` - so it 404s every call and the memory sidecar
-/// never runs. The catalog and routing use the bare id everywhere; match it.
+/// Fast/cheap Claude model when only Claude credentials exist. Bare canonical id: the dated `claude-haiku-4-5-20241022` does not exist on the Anthropic API (that date is `claude-3-5-haiku`), so it 404s every call and the sidecar never runs; catalog and routing use the bare id.
 const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5";
 
 /// OpenAI Responses API
