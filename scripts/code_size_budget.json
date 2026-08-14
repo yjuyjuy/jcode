@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent/turn_loops.rs": 1204,
+    "crates/jcode-app-core/src/agent/turn_loops.rs": 1212,
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1736,
     "crates/jcode-app-core/src/overnight.rs": 1275,
     "crates/jcode-app-core/src/server.rs": 2378,
@@ -31,7 +31,7 @@
     "crates/jcode-base/src/memory.rs": 2065,
     "crates/jcode-base/src/memory_agent.rs": 1901,
     "crates/jcode-base/src/provider/catalog_routes.rs": 1521,
-    "crates/jcode-base/src/provider/mod.rs": 2832,
+    "crates/jcode-base/src/provider/mod.rs": 2841,
     "crates/jcode-base/src/session.rs": 1622,
     "crates/jcode-base/src/sidecar.rs": 1319,
     "crates/jcode-base/src/skill.rs": 1426,
@@ -51,7 +51,7 @@
     "crates/jcode-protocol/src/wire.rs": 1566,
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": 2580,
     "crates/jcode-provider-bedrock/src/lib.rs": 1979,
-    "crates/jcode-provider-core/src/lib.rs": 1670,
+    "crates/jcode-provider-core/src/lib.rs": 1679,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 1974,
     "crates/jcode-provider-doctor/src/live_provider_probes.rs": 2029,
     "crates/jcode-provider-doctor/src/provider_e2e.rs": 2713,

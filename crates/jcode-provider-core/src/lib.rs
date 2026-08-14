@@ -329,6 +329,15 @@ pub trait Provider: Send + Sync {
     /// Invalidate any cached credentials.
     async fn invalidate_credentials(&self) {}
 
+    /// Re-evaluate multi-account selection against current usage and switch the
+    /// active account if the configured strategy warrants it, invalidating cached
+    /// credentials so the next request uses the new account. Default no-op for
+    /// providers without multi-account support. Implementations must be cheap to
+    /// call often (they are invoked at turn boundaries) and internally rate-limit
+    /// the expensive usage probe, so a caller can invoke this every turn without
+    /// adding per-turn latency.
+    async fn reselect_account(&self) {}
+
     /// Set Copilot premium request conservation mode.
     fn set_premium_mode(&self, _mode: PremiumMode) {}
 

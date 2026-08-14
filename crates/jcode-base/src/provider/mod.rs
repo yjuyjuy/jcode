@@ -2174,6 +2174,14 @@ impl Provider for MultiProvider {
         }
     }
 
+    async fn reselect_account(&self) {
+        // Poll-driven, cooldown-gated selection against current usage. Reuses the
+        // same strategy dispatch (pace / priority / exhaustion-only) as startup,
+        // and invalidates cached credentials on a switch, so the next request
+        // uses the newly selected account.
+        self.reevaluate_account_selection();
+    }
+
     fn account_label(&self) -> Option<String> {
         // Report the pin of whichever concrete runtime is active, so callers
         // see the account the current model actually uses.
