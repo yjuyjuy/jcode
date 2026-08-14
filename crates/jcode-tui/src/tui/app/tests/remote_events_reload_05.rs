@@ -151,6 +151,9 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -245,6 +248,11 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
                 delivery_state: Some(crate::todo::DeliveryState::Integrated),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
                 feedback_loop: Some("run the end-to-end release check".to_string()),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 ..Default::default()
             }],
         )
@@ -253,10 +261,54 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
-        assert!(app.queued_messages[0].contains("delivery_state"));
+        assert!(app.queued_messages[0].contains("complete workflow"));
 
         let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
         assert_eq!(saved[0].status, "completed");
+    });
+}
+
+#[test]
+fn remote_ownership_gate_reads_the_remote_goal_assessment() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.is_remote = true;
+        let remote_session_id = format!("remote-ownership-{}", std::process::id());
+        app.remote_session_id = Some(remote_session_id.clone());
+
+        crate::todo::save_todos(
+            &remote_session_id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the complete workflow".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                group: Some("release".to_string()),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                confidence_history: vec![crate::todo::ConfidenceState::Verified],
+                ..Default::default()
+            }],
+        )
+        .expect("save remote completed todo");
+        crate::todo::save_goals(
+            &remote_session_id,
+            &[crate::todo::TodoGoal {
+                group: Some("release".to_string()),
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save remote goal assessment");
+
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages.is_empty());
     });
 }
 
@@ -441,6 +493,9 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -538,6 +593,51 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 }
 
 #[test]
+fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        let pending = |content: &str| crate::todo::TodoItem {
+            id: "todo-1".to_string(),
+            content: content.to_string(),
+            status: "pending".to_string(),
+            priority: "high".to_string(),
+            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+            ..Default::default()
+        };
+
+        crate::todo::save_todos(&app.session.id, &[pending("Wait for worker")]).expect("save");
+        assert!(app.schedule_auto_poke_followup_if_needed());
+
+        // Simulate dispatch and completion of the automatically poked turn.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(
+            !app.schedule_auto_poke_followup_if_needed(),
+            "an unchanged list must not consume another model turn"
+        );
+
+        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
+            .expect("update");
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "changing the todo list must re-arm the automatic nudge"
+        );
+
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        crate::todo::save_todos(&app.session.id, &[]).expect("finish cycle");
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
+            .expect("start equivalent new cycle");
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "an equivalent todo in a new cycle must receive one fresh nudge"
+        );
+    });
+}
+
+#[test]
 fn completed_cycle_rearms_auto_poke_only_when_default_on() {
     with_temp_jcode_home(|| {
         let completed = |id: &str| crate::todo::TodoItem {
@@ -564,6 +664,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -586,6 +689,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )

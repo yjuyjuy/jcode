@@ -306,8 +306,7 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
             ..
         }) => {
             assert_eq!(total_todos, 2);
-            assert_eq!(message, crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE);
-            assert!(!message.chars().any(|ch| ch.is_ascii_digit()));
+            assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
             assert!(message.contains("completion confidence"));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
@@ -334,10 +333,7 @@ fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
             ..
         }) => {
             assert!(confidence_spike_challenge);
-            assert_eq!(
-                message,
-                crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE
-            );
+            assert!(message.starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE));
         }
         _ => panic!("expected confidence-spike challenge"),
     }
@@ -406,6 +402,34 @@ fn run_auto_poke_followup_prioritizes_incomplete_todos() {
             );
         }
         _ => panic!("expected incomplete-todo follow-up"),
+    }
+}
+
+#[test]
+fn run_auto_poke_treats_completion_synonyms_and_case_as_finished() {
+    for status in ["done", "finished", "complete", "Completed", " DONE "] {
+        let todos = vec![test_todo(
+            "a",
+            status,
+            "high",
+            Some(ConfidenceState::Verified),
+            Some(ConfidenceState::Verified),
+        )];
+        assert!(
+            build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none(),
+            "status {status:?} should not trigger an incomplete-todo poke"
+        );
+    }
+}
+
+#[test]
+fn run_auto_poke_treats_cancelled_spelling_variants_as_finished() {
+    for status in ["cancelled", "canceled", "Cancelled"] {
+        let todos = vec![test_todo("a", status, "high", None, None)];
+        assert!(
+            build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none(),
+            "status {status:?} should not trigger an incomplete-todo poke"
+        );
     }
 }
 

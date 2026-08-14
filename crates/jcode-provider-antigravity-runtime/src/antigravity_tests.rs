@@ -642,3 +642,60 @@ fn is_retryable_empty_turn_ignores_normal_and_productive_turns() {
     .expect("decode empty stop response");
     assert!(!is_retryable_empty_turn(&empty_stop));
 }
+
+#[test]
+fn pseudo_tool_call_turn_only_matches_the_recovery_marker_as_a_call() {
+    let response = |text: &str| {
+        serde_json::from_value::<CodeAssistGenerateResponse>(serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {"parts": [{"text": text}]},
+                    "finishReason": "STOP"
+                }]
+            }
+        }))
+        .expect("decode response")
+    };
+
+    assert!(jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("  [previous tool call] todo({\"todos\":[]})")
+    ));
+    assert!(!jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("I saw [previous tool call] todo({}) in the transcript")
+    ));
+    assert!(!jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("[previous tool call] was only a history marker")
+    ));
+    assert!(!jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("ordinary answer")
+    ));
+}
+
+/// End-to-end guard for the turn-2 HTTP 404: `--provider antigravity` gives the
+/// agent this runtime directly, and session restore calls `set_model` with the
+/// routing spec `antigravity:<model>`. The id we store is the id we put on the
+/// wire, so it must be the bare model name.
+#[test]
+fn set_model_stores_bare_id_for_prefixed_session_restore_spec() {
+    let provider = AntigravityProvider::new();
+
+    provider
+        .set_model("antigravity:gemini-3-flash")
+        .expect("prefixed session-restore spec must be accepted");
+    assert_eq!(
+        provider.model(),
+        "gemini-3-flash",
+        "the wire model id must never carry the antigravity: routing prefix"
+    );
+
+    provider
+        .set_model("gemini-3-flash")
+        .expect("bare id must still be accepted");
+    assert_eq!(provider.model(), "gemini-3-flash");
+
+    assert!(
+        provider.set_model("antigravity:").is_err(),
+        "a prefix with no model must be rejected, not stored as an empty model"
+    );
+    assert!(provider.set_model("   ").is_err());
+}

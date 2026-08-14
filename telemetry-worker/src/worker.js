@@ -44,6 +44,9 @@ const KNOWN_EVENTS = [
   ...SUBSCRIPTION_EVENTS,
 ];
 
+const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // Origins the website beacon posts from. The default CORS policy stays the
 // permissive ALLOWED_ORIGIN var ("*", telemetry is anonymous and unauthed);
 // allowlisted origins are echoed back explicitly so the policy keeps working
@@ -59,10 +62,10 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // ---------------------------------------------------------------------------
 // Self-defense against the D1 size cap.
 //
-// D1 hard-caps database size (500 MB class on the free plan). When the cap is
-// hit, every insert fails and telemetry silently stops being recorded (this
-// happened in June 2026; ~3 days of events were lost and the file was left at
-// its ~491.5 MB high-water mark). SQLite files never shrink on DELETE - the
+// D1 hard-caps each database at 10 GB on the Workers Paid plan (500 MB on the
+// free plan). When the old free-plan cap was hit, every insert failed and
+// telemetry silently stopped being recorded (June 2026; ~3 days of events were
+// lost). SQLite files never shrink on DELETE - the
 // nightly prune frees pages *inside* the file and the day's inserts recycle
 // them - so the steady state is "file at high-water mark, internal free-page
 // pool cycling". Two triggers defend the pool:
@@ -76,7 +79,11 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // Emergency prunes use halved retention windows and are rate-limited per
 // isolate.
 // ---------------------------------------------------------------------------
-const D1_SOFT_LIMIT_BYTES = 493_000_000;
+// Keep the database below the paid plan's first 5 GB of included account-wide
+// storage, leaving 500 MB for the account's other D1 databases and growth while
+// an emergency prune catches up. This is a budget guardrail, not D1's 10 GB
+// per-database hard cap.
+const D1_SOFT_LIMIT_BYTES = 4_500_000_000;
 const EMERGENCY_PRUNE_COOLDOWN_MS = 10 * 60 * 1000;
 // Best-effort per-isolate state (resets on isolate recycle, which is fine:
 // the next request re-observes the size from its own insert result).
@@ -433,6 +440,10 @@ export default {
       return jsonResponse({ error: "Method not allowed" }, 405, cors);
     }
 
+    if (url.pathname === "/v1/transcript") {
+      return ingestTranscript(request, env, cors);
+    }
+
     if (url.pathname !== "/v1/event") {
       return jsonResponse({ error: "Not found" }, 404, cors);
     }
@@ -536,11 +547,9 @@ export default {
     return jsonResponse({ ok: true, durable: durableOk, firehose: firehoseOk }, 200, cors);
   },
 
-  // Nightly retention pruning. D1 hard-caps databases at 500 MB; without this
-  // the raw events table eventually fills the cap and every insert starts
-  // returning 500s (which silently drops all telemetry). High-volume raw rows
-  // are pruned on a schedule while aggregate signal is preserved in the
-  // daily_active_users rollup and in long-retention lifecycle events.
+  // Nightly retention pruning bounds durable raw-history growth and keeps the
+  // database inside its paid-plan storage budget. Aggregate signal is preserved
+  // in the daily_active_users rollup and in long-retention lifecycle events.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
@@ -561,6 +570,147 @@ export default {
     );
   },
 };
+
+async function ingestTranscript(request, env, cors) {
+  if (!env.TRANSCRIPTS || typeof env.TRANSCRIPTS.put !== "function") {
+    return jsonResponse({ error: "Transcript storage unavailable" }, 503, cors);
+  }
+  const declaredSize = Number(request.headers.get("content-length") || 0);
+  if (declaredSize > MAX_TRANSCRIPT_BYTES) {
+    return jsonResponse({ error: "Transcript payload too large" }, 413, cors);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON" }, 400, cors);
+  }
+  const problem = validateTranscript(body);
+  if (problem) {
+    return jsonResponse({ error: problem }, 400, cors);
+  }
+
+  // Defense in depth: clients redact before upload, but the public endpoint
+  // must not trust callers to have done so. Preserve ordinary code and prose
+  // while removing high-confidence credentials and sensitive object fields.
+  redactSecretsInValue(body.messages);
+
+  const encoded = JSON.stringify(body);
+  const byteLength = new TextEncoder().encode(encoded).byteLength;
+  if (byteLength > MAX_TRANSCRIPT_BYTES) {
+    return jsonResponse({ error: "Transcript payload too large" }, 413, cors);
+  }
+
+  const month = new Date().toISOString().slice(0, 7);
+  const objectKey = `transcripts/${month}/${body.upload_id}.json`;
+  try {
+    await env.TRANSCRIPTS.put(objectKey, encoded, {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: {
+        consent_version: String(body.consent_version),
+        telemetry_id: body.id,
+      },
+    });
+    await env.DB.prepare(`
+      INSERT INTO transcript_uploads (
+        upload_id, telemetry_id, object_key, consent_version, schema_version,
+        version, provider, model, end_reason, message_count, byte_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      body.upload_id,
+      body.id,
+      objectKey,
+      body.consent_version,
+      body.schema_version,
+      body.version,
+      body.provider || null,
+      body.model || null,
+      body.end_reason,
+      body.message_count,
+      byteLength,
+    ).run();
+  } catch (err) {
+    try {
+      await env.TRANSCRIPTS.delete(objectKey);
+    } catch {
+      // Best effort rollback. R2 lifecycle retention remains the safety net.
+    }
+    console.error("transcript upload failed", err?.message || err);
+    return jsonResponse({ error: "Internal error" }, 500, cors);
+  }
+  return jsonResponse({ ok: true, upload_id: body.upload_id }, 200, cors);
+}
+
+function validateTranscript(body) {
+  if (!body || body.event !== "transcript") return "Invalid transcript event";
+  if (!UUID_RE.test(body.id || "") || !UUID_RE.test(body.upload_id || "")) {
+    return "Invalid transcript identifier";
+  }
+  if (body.consent_version !== 1) return "Unsupported consent version";
+  if (!Number.isInteger(body.schema_version) || body.schema_version < 1) {
+    return "Invalid schema version";
+  }
+  if (typeof body.version !== "string" || !body.version) return "Missing version";
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    return "Transcript messages must be a non-empty array";
+  }
+  if (!Number.isInteger(body.message_count) || body.message_count !== body.messages.length) {
+    return "Transcript message count mismatch";
+  }
+  if (!["normal_exit", "user_exit", "error", "unknown", "superseded"].includes(body.end_reason)) {
+    return "Invalid transcript end reason";
+  }
+  return null;
+}
+
+const SENSITIVE_KEY_RE = /^(?:authorization|cookie|setcookie|privatekey|clientsecret)$/;
+
+function isSensitiveKey(key) {
+  const normalized = String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized.includes("apikey")
+    || normalized.endsWith("token")
+    || normalized.endsWith("secret")
+    || normalized.includes("password")
+    || SENSITIVE_KEY_RE.test(normalized);
+}
+
+function redactSecretText(text) {
+  return text
+    .replace(/sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/sk-or-v1-[A-Za-z0-9_-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/ghp_[A-Za-z0-9]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/ya29\.[A-Za-z0-9._-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/xox[baprs]-[A-Za-z0-9-]{10,}/g, "[REDACTED_SECRET]")
+    .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED_SECRET]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{20,}/gi, "Bearer [REDACTED_SECRET]")
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED_SECRET]")
+    .replace(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, "[REDACTED_SECRET]")
+    .replace(/^\s*([A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|COOKIE)\s*=\s*)[^\r\n]+/gim, "$1[REDACTED_SECRET]")
+    .replace(/^\s*(AUTHORIZATION\s*[:=]\s*)[^\r\n]+/gim, "$1[REDACTED_SECRET]");
+}
+
+function redactSecretsInValue(value) {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (typeof value[index] === "string") value[index] = redactSecretText(value[index]);
+      else redactSecretsInValue(value[index]);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    if (isSensitiveKey(key)) {
+      value[key] = "[REDACTED_SECRET]";
+    } else if (typeof entry === "string") {
+      value[key] = redactSecretText(entry);
+    } else {
+      redactSecretsInValue(entry);
+    }
+  }
+}
 
 function observeDbSize(result) {
   const size = result?.meta?.size_after;

@@ -45,6 +45,7 @@ use jcode_provider_core::{
     anthropic_strip_1m_suffix as strip_1m_suffix,
 };
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -58,6 +59,103 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
+
+fn direct_api_url() -> String {
+    let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    match base {
+        Some(base) if base.ends_with("/messages") => base,
+        Some(base) => format!("{base}/messages"),
+        None => API_URL.to_string(),
+    }
+}
+
+fn configured_direct_headers() -> Result<HeaderMap> {
+    let Some(raw) = std::env::var("JCODE_ANTHROPIC_HEADERS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(HeaderMap::new());
+    };
+    let headers: std::collections::BTreeMap<String, String> = serde_json::from_str(&raw)
+        .context("JCODE_ANTHROPIC_HEADERS must be a JSON object of string values")?;
+    let mut result = HeaderMap::new();
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("invalid Anthropic-compatible header name '{name}'"))?;
+        let value = HeaderValue::from_str(&value)
+            .with_context(|| format!("invalid value for Anthropic-compatible header '{name}'"))?;
+        result.insert(name, value);
+    }
+    Ok(result)
+}
+
+fn direct_auth_mode() -> String {
+    std::env::var("JCODE_ANTHROPIC_AUTH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if std::env::var("ANTHROPIC_AUTH_TOKEN")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                "bearer".to_string()
+            } else {
+                "header".to_string()
+            }
+        })
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[derive(Clone)]
+struct DirectTransportConfig {
+    api_url: String,
+    headers: std::result::Result<HeaderMap, String>,
+    auth_mode: String,
+    auth_header: String,
+}
+
+impl DirectTransportConfig {
+    fn from_env() -> Self {
+        Self {
+            api_url: direct_api_url(),
+            headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
+            auth_mode: direct_auth_mode(),
+            auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
+                .unwrap_or_else(|_| "x-api-key".to_string()),
+        }
+    }
+}
+
+fn active_anthropic_profile_models() -> Option<Vec<String>> {
+    let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") else {
+        return None;
+    };
+    let Some(profile) = jcode_base::config::config().providers.get(&profile_name) else {
+        return None;
+    };
+    if !matches!(
+        profile.provider_type,
+        jcode_base::config::NamedProviderType::AnthropicCompatible
+    ) {
+        return None;
+    }
+    let mut models = profile
+        .models
+        .iter()
+        .map(|configured| configured.id.clone())
+        .collect::<Vec<_>>();
+    if let Some(default) = &profile.default_model
+        && !models.contains(default)
+    {
+        models.push(default.clone());
+    }
+    Some(models)
+}
 
 #[cfg(test)]
 pub(crate) const OAUTH_BETA_HEADERS_1M: &str = jcode_provider_core::ANTHROPIC_OAUTH_BETA_HEADERS_1M;
@@ -378,6 +476,11 @@ pub struct AnthropicProvider {
     max_tokens_override: Option<u32>,
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
+    direct_transport: DirectTransportConfig,
+    /// Named profiles pin their credential at runtime construction so another
+    /// session/profile cannot redirect this runtime to a different process env.
+    profile_api_key: Option<std::result::Result<String, String>>,
+    profile_models: Option<Vec<String>>,
     /// Per-instance account pin. When `Some`, this session loads and refreshes
     /// credentials for this specific account label instead of following the
     /// process-global active account. This is what lets one live session switch
@@ -523,6 +626,11 @@ impl AnthropicProvider {
             .and_then(Self::normalize_reasoning_effort)
             .map(|effort| Self::store_effort_for_model(&model, &effort));
 
+        let direct_transport = DirectTransportConfig::from_env();
+        let profile_api_key = std::env::var_os("JCODE_ANTHROPIC_API_BASE")
+            .map(|_| load_anthropic_api_key().map_err(|err| format!("{err:#}")));
+        let profile_models = active_anthropic_profile_models();
+
         Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(std::sync::RwLock::new(model)),
@@ -535,7 +643,18 @@ impl AnthropicProvider {
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            direct_transport,
+            profile_api_key,
+            profile_models,
             account_pin: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    fn direct_api_key(&self) -> Result<String> {
+        match &self.profile_api_key {
+            Some(Ok(key)) => Ok(key.clone()),
+            Some(Err(err)) => anyhow::bail!(err.clone()),
+            None => load_anthropic_api_key(),
         }
     }
 
@@ -815,7 +934,7 @@ impl AnthropicProvider {
         // Explicit API-key mode: use the direct API key and surface an error if
         // one is not configured (never silently fall back to OAuth).
         if matches!(mode, AnthropicCredentialMode::ApiKey) {
-            let key = load_anthropic_api_key()?;
+            let key = self.direct_api_key()?;
             return Ok((key, false)); // false = not OAuth
         }
 
@@ -828,7 +947,7 @@ impl AnthropicProvider {
         if matches!(mode, AnthropicCredentialMode::Auto) {
             match self.get_oauth_access_token().await {
                 Ok(token) => return Ok(token),
-                Err(oauth_err) => match load_anthropic_api_key() {
+                Err(oauth_err) => match self.direct_api_key() {
                     Ok(key) => {
                         jcode_base::logging::warn(&format!(
                             "Claude OAuth is unusable in automatic credential mode ({oauth_err:#}); falling back to the configured Anthropic API key"
@@ -1153,6 +1272,7 @@ impl Provider for AnthropicProvider {
         let credentials = Arc::clone(&self.credentials);
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
+        let direct_transport = self.direct_transport.clone();
         let account_pin = self.account_pin_snapshot();
 
         // Spawn task to handle streaming with retry logic.
@@ -1177,6 +1297,7 @@ impl Provider for AnthropicProvider {
                 model,
                 oauth_session_id,
                 model_state,
+                direct_transport,
                 account_pin,
             )
             .await;
@@ -1214,9 +1335,13 @@ impl Provider for AnthropicProvider {
         } else {
             model
         };
-        if !jcode_base::provider::known_anthropic_model_ids()
-            .iter()
-            .any(|known| known == model)
+        if !self
+            .profile_models
+            .as_ref()
+            .is_some_and(|models| models.iter().any(|configured| configured == model))
+            && !jcode_base::provider::known_anthropic_model_ids()
+                .iter()
+                .any(|known| known == model)
         {
             anyhow::bail!("Model {} not supported by Anthropic provider", model);
         }
@@ -1361,6 +1486,12 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if self.direct_transport.api_url != API_URL {
+            // Named Anthropic-compatible profiles use their configured static
+            // model list. Never send gateway credentials to Anthropic's
+            // official hard-coded model-catalog endpoint.
+            return Ok(());
+        }
         let (token, is_oauth) = self.get_access_token().await?;
         if token.trim().is_empty() {
             return Ok(());
@@ -1437,6 +1568,9 @@ impl Provider for AnthropicProvider {
             oauth_preflight_done: Arc::new(AtomicBool::new(
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
+            direct_transport: self.direct_transport.clone(),
+            profile_api_key: self.profile_api_key.clone(),
+            profile_models: self.profile_models.clone(),
             // A fork gets its own account pin lock seeded with the current pin,
             // so later per-session switches on the fork or original do not leak
             // into each other.
@@ -1554,6 +1688,7 @@ impl Provider for AnthropicProvider {
         let credentials = Arc::clone(&self.credentials);
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
+        let direct_transport = self.direct_transport.clone();
         let account_pin = self.account_pin_snapshot();
 
         // Spawn task to handle streaming with retry logic
@@ -1577,6 +1712,7 @@ impl Provider for AnthropicProvider {
                 model,
                 oauth_session_id,
                 model_state,
+                direct_transport,
                 account_pin,
             )
             .await;
@@ -1600,6 +1736,7 @@ async fn run_stream_with_retries(
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
+    direct_transport: DirectTransportConfig,
     account_pin: Option<String>,
 ) {
     let mut token = initial_token;
@@ -1661,6 +1798,7 @@ async fn run_stream_with_retries(
             attempt_tx,
             &model_name,
             &oauth_session_id,
+            &direct_transport,
         )
         .await
         {
@@ -1920,6 +2058,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
     oauth_session_id: &str,
+    direct_transport: &DirectTransportConfig,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -1940,10 +2079,22 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
     // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    let url = if is_oauth {
+        API_URL_OAUTH
+    } else {
+        direct_transport.api_url.as_str()
+    };
 
-    let mut req = client
-        .post(url)
+    let mut req = client.post(url);
+    if !is_oauth {
+        req = req.headers(
+            direct_transport
+                .headers
+                .clone()
+                .map_err(anyhow::Error::msg)?,
+        );
+    }
+    req = req
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
         .header(
@@ -1981,9 +2132,19 @@ async fn stream_response(
         };
         let beta_header =
             anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
-        req = req
-            .header("x-api-key", &token)
-            .header("anthropic-beta", beta_header);
+        req = match direct_transport.auth_mode.as_str() {
+            "none" => req,
+            "bearer" => req.header("Authorization", format!("Bearer {token}")),
+            "header" => {
+                let header = HeaderName::from_bytes(direct_transport.auth_header.trim().as_bytes())
+                    .context("invalid JCODE_ANTHROPIC_AUTH_HEADER")?;
+                req.header(header, &token)
+            }
+            value => anyhow::bail!(
+                "invalid JCODE_ANTHROPIC_AUTH value '{value}' (expected bearer, header, or none)"
+            ),
+        };
+        req = req.header("anthropic-beta", beta_header);
     }
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(

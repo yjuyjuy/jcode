@@ -205,6 +205,12 @@ impl PinTodosEnvGuard {
         crate::config::invalidate_config_cache();
         Self
     }
+
+    fn disable() -> Self {
+        crate::env::set_var("JCODE_PIN_TODOS", "0");
+        crate::config::invalidate_config_cache();
+        Self
+    }
 }
 
 impl Drop for PinTodosEnvGuard {
@@ -219,6 +225,7 @@ impl Drop for PinTodosEnvGuard {
 #[test]
 fn pinned_todos_payload_stays_empty_when_config_off() {
     let _env_lock = crate::storage::lock_test_env();
+    let _pin_guard = PinTodosEnvGuard::disable();
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", "pin me", "pending")]).unwrap();
@@ -258,7 +265,71 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
 }
 
 #[test]
-fn pinned_todo_band_renders_at_top_when_scrolled() {
+fn pinned_todos_are_omitted_from_info_widgets() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::enable();
+    let app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("t1", "only in pinned band", "pending")],
+    )
+    .unwrap();
+
+    let info = app.info_widget_data();
+    assert!(info.todos.is_empty());
+    assert!(info.todo_goals.is_empty());
+    assert!(!info.has_data_for(crate::tui::info_widget::WidgetKind::Todos));
+
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+}
+
+#[test]
+fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("pinned", "PINNED_ONLY", "in_progress")],
+    )
+    .unwrap();
+    app.refresh_pinned_todos_now();
+    app.display_messages = vec![
+        DisplayMessage::tool(
+            "duplicate todo transcript card",
+            crate::message::ToolCall {
+                id: "todo-tool".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({"todos": []}),
+                intent: None,
+                thought_signature: None,
+            },
+        ),
+        DisplayMessage::tool(
+            "ordinary tool remains visible",
+            crate::message::ToolCall {
+                id: "read-tool".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "README.md"}),
+                intent: None,
+                thought_signature: None,
+            },
+        ),
+    ];
+    app.bump_display_messages_version();
+    app.session.short_name = Some("test".to_string());
+    let backend = ratatui::backend::TestBackend::new(80, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let transcript = render_and_snap(&app, &mut terminal);
+    assert!(!transcript.contains("duplicate todo transcript card"));
+    assert!(transcript.contains("PINNED_ONLY"), "{transcript}");
+    let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
+fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
@@ -300,12 +371,35 @@ fn pinned_todo_band_renders_at_top_when_scrolled() {
 
     let backend = ratatui::backend::TestBackend::new(60, 16);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+
+    app.auto_scroll_paused = true;
+    let top_text = render_and_snap(&app, &mut terminal);
+    assert!(
+        top_text.lines().take(6).any(|row| row.contains("pinned band item")),
+        "pinned todo should remain visible at the top of scrollback, got:\n{}",
+        top_text
+    );
+
+    app.auto_scroll_paused = false;
     let text = render_and_snap(&app, &mut terminal);
 
-    let first_rows = text.lines().take(4).collect::<Vec<_>>().join(" ");
+    let first_rows = text.lines().take(6).collect::<Vec<_>>();
+    let prompt_row = first_rows
+        .iter()
+        .position(|row| row.contains("kick off the work"))
+        .expect("sticky prompt should be visible");
+    let todo_row = first_rows
+        .iter()
+        .position(|row| row.contains("pinned band item"))
+        .expect("pinned todo should be visible");
     assert!(
-        first_rows.contains("pinned band item"),
-        "pinned todo band should render at the top of the scrolled viewport, got:\n{}",
+        prompt_row < todo_row,
+        "pinned todo band should render below the sticky prompt, got:\n{}",
+        text
+    );
+    assert!(
+        !first_rows.iter().any(|row| row.contains("────")),
+        "pinned todo band should not render a horizontal separator, got:\n{}",
         text
     );
 

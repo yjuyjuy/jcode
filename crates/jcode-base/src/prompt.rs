@@ -6,6 +6,31 @@ use std::process::Command;
 /// Default system prompt for jcode (embedded at compile time)
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 
+/// Load the base system prompt, allowing the user to fully replace the built-in
+/// [`DEFAULT_SYSTEM_PROMPT`]. Precedence: project `./.jcode/system-prompt.md`,
+/// then global `~/.jcode/system-prompt.md`, then the built-in default.
+///
+/// This is a *replacement* hook. To merely add guidance on top of the default,
+/// use `.jcode/prompt-overlay.md` instead.
+pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
+    let project_dir = working_dir.unwrap_or(Path::new("."));
+    let candidates = [
+        Some(project_dir.join(".jcode").join("system-prompt.md")),
+        crate::storage::jcode_dir()
+            .ok()
+            .map(|dir| dir.join("system-prompt.md")),
+    ];
+    for path in candidates.into_iter().flatten() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    DEFAULT_SYSTEM_PROMPT.to_string()
+}
+
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
@@ -29,8 +54,11 @@ impl PromptCapabilities {
     }
 }
 
-fn base_system_prompt_parts(capabilities: PromptCapabilities) -> Vec<String> {
-    let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
+fn base_system_prompt_parts(
+    capabilities: PromptCapabilities,
+    working_dir: Option<&Path>,
+) -> Vec<String> {
+    let mut parts = vec![load_base_system_prompt(working_dir)];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
@@ -201,6 +229,41 @@ impl SplitSystemPrompt {
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
+}
+
+const SKILL_DESC_MAX_CHARS: usize = 120;
+
+fn clip_skill_description(description: &str) -> String {
+    let one_line = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= SKILL_DESC_MAX_CHARS {
+        return one_line;
+    }
+
+    let mut clipped: String = one_line
+        .chars()
+        .take(SKILL_DESC_MAX_CHARS.saturating_sub(1))
+        .collect();
+    clipped.push('…');
+    clipped
+}
+
+fn build_available_skills_section(available_skills: &[SkillInfo]) -> Option<String> {
+    if available_skills.is_empty() {
+        return None;
+    }
+
+    let mut section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
+    for skill in available_skills {
+        section.push_str(&format!(
+            "\n- `/{} ` - {}",
+            skill.name,
+            clip_skill_description(&skill.description)
+        ));
+    }
+    section.push_str(
+        "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
+    );
+    Some(section)
 }
 
 /// Information about what's loaded in the context window
@@ -379,7 +442,7 @@ pub fn build_system_prompt_full_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (String, ContextInfo) {
-    let mut parts = base_system_prompt_parts(capabilities);
+    let mut parts = base_system_prompt_parts(capabilities, working_dir);
     let mut info = ContextInfo {
         system_prompt_chars: parts.join("\n\n").len(),
         ..Default::default()
@@ -425,14 +488,7 @@ pub fn build_system_prompt_full_with_capabilities(
     }
 
     // Add available skills list
-    if !available_skills.is_empty() {
-        let mut skills_section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
-        for skill in available_skills {
-            skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
-        }
-        skills_section.push_str(
-            "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
-        );
+    if let Some(skills_section) = build_available_skills_section(available_skills) {
         info.skills_chars = skills_section.len();
         parts.push(skills_section);
     }
@@ -475,7 +531,7 @@ pub fn build_system_prompt_split_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities);
+    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -518,14 +574,7 @@ pub fn build_system_prompt_split_with_capabilities(
     }
 
     // Add available skills list (fairly static)
-    if !available_skills.is_empty() {
-        let mut skills_section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
-        for skill in available_skills {
-            skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
-        }
-        skills_section.push_str(
-            "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
-        );
+    if let Some(skills_section) = build_available_skills_section(available_skills) {
         info.skills_chars = skills_section.len();
         static_parts.push(skills_section);
     }
@@ -812,8 +861,10 @@ fn gpu_summary() -> Option<String> {
     }
 }
 
-/// Load AGENTS.md files from a specific working directory
-pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, ContextInfo) {
+fn load_agents_md_files_from_dirs(
+    project_dir: &Path,
+    global_agents_md: Option<&Path>,
+) -> (Option<String>, ContextInfo) {
     let mut contents = vec![];
     let mut info = ContextInfo::default();
 
@@ -830,21 +881,31 @@ pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
         }
     };
 
-    // Project-level files (from specified working directory or current directory)
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    if let Some((content, size)) = load_file(
-        &project_dir.join("AGENTS.md"),
-        "Project Instructions (AGENTS.md)",
-    ) {
+    let project_agents_md = project_dir.join("AGENTS.md");
+    if let Some((content, size)) = load_file(&project_agents_md, "Project Instructions (AGENTS.md)")
+    {
         info.has_project_agents_md = true;
         info.project_agents_md_chars = size;
         contents.push(content);
     }
 
-    // Home directory files
-    if let Ok(global_agents_md) = crate::storage::user_home_path("AGENTS.md")
+    // Canonical file identity handles cwd=$HOME as well as symlinked aliases.
+    // If either file is absent or cannot be resolved, loading below remains the
+    // source of truth and simply skips unreadable files.
+    let global_duplicates_project = global_agents_md.is_some_and(|global_agents_md| {
+        match (
+            std::fs::canonicalize(&project_agents_md),
+            std::fs::canonicalize(global_agents_md),
+        ) {
+            (Ok(project), Ok(global)) => project == global,
+            _ => false,
+        }
+    });
+
+    if !global_duplicates_project
+        && let Some(global_agents_md) = global_agents_md
         && let Some((content, size)) =
-            load_file(&global_agents_md, "Global Instructions (~/AGENTS.md)")
+            load_file(global_agents_md, "Global Instructions (~/AGENTS.md)")
     {
         info.has_global_agents_md = true;
         info.global_agents_md_chars = size;
@@ -856,6 +917,13 @@ pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
     } else {
         (Some(contents.join("\n\n")), info)
     }
+}
+
+/// Load AGENTS.md files from a specific working directory.
+pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, ContextInfo) {
+    let project_dir = working_dir.unwrap_or(Path::new("."));
+    let global_agents_md = crate::storage::user_home_path("AGENTS.md").ok();
+    load_agents_md_files_from_dirs(project_dir, global_agents_md.as_deref())
 }
 
 /// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/
