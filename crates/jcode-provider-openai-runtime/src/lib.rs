@@ -719,6 +719,11 @@ pub struct OpenAIProvider {
     /// True when this runtime was created without API credentials. It can still
     /// serve browser-backed models and upgrades in place after a successful login.
     browser_only: Arc<AtomicBool>,
+    /// Per-instance account pin. When `Some`, this session's credentials were
+    /// loaded for this specific account label instead of the process-global
+    /// active account, so one live session can switch accounts without
+    /// disturbing its siblings (ADR 0031 control surface).
+    account_pin: Arc<StdRwLock<Option<String>>>,
 }
 
 impl OpenAIProvider {
@@ -860,9 +865,18 @@ impl OpenAIProvider {
             persistent_ws: Arc::new(Mutex::new(None)),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
+            account_pin: Arc::new(StdRwLock::new(None)),
         };
         provider.revalidate_reasoning_effort();
         provider
+    }
+
+    /// Current per-instance account pin, if any.
+    fn account_pin_snapshot(&self) -> Option<String> {
+        self.account_pin
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
     fn is_browser_only(&self) -> bool {
@@ -891,6 +905,33 @@ impl OpenAIProvider {
         }
 
         self.clear_persistent_ws_try("credentials reloaded");
+    }
+
+    /// Pin this OpenAI runtime to a specific account label. Loads that
+    /// account's stored credentials into the in-memory credential slot so the
+    /// next request uses them. An in-flight request already holds its token, so
+    /// this never disturbs a turn already streaming.
+    pub(crate) fn set_account_pin(&self, label: Option<String>) -> Result<()> {
+        if let Some(ref label) = label {
+            let credentials = jcode_base::auth::codex::load_credentials_for_account(label)
+                .with_context(|| format!("Cannot pin OpenAI account '{label}'"))?;
+            match self.credentials.try_write() {
+                Ok(mut guard) => {
+                    *guard = credentials;
+                    self.browser_only.store(false, AtomicOrdering::Release);
+                    self.reload_cached_reasoning_efforts();
+                }
+                Err(_) => {
+                    anyhow::bail!("Cannot switch OpenAI account while a request is in progress");
+                }
+            }
+            self.clear_persistent_ws_try("account pinned");
+        }
+        match self.account_pin.write() {
+            Ok(mut guard) => *guard = label,
+            Err(poisoned) => *poisoned.into_inner() = label,
+        }
+        Ok(())
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {

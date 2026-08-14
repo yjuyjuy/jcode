@@ -2777,6 +2777,14 @@ pub(super) async fn handle_client(
             Request::ClientDebugResponse { id, output } => {
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
+
+            // Session-control requests are lightweight/subscription-free and are
+            // dispatched before the subscribe loop is entered, so they never
+            // reach this stateful match. Handle them defensively as a no-op to
+            // keep the match exhaustive.
+            Request::ListSessions { .. }
+            | Request::SwitchSessionAccount { .. }
+            | Request::SwitchSessionAccountModel { .. } => {}
         }
         if request_lifecycle_logged {
             log_request_lifecycle_handled(

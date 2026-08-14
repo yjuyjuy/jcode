@@ -78,6 +78,41 @@ impl Agent {
         )
     }
 
+    /// The account label the active provider runtime is currently pinned to, if
+    /// any. `None` means the session follows the process-global active account.
+    pub fn account_label(&self) -> Option<String> {
+        self.provider.account_label()
+    }
+
+    /// Pin this session's active provider to a specific account. The pin takes
+    /// effect on the next turn: an in-flight request keeps the account it
+    /// started with, so a switch never interrupts a turn (drain semantics).
+    ///
+    /// Resets the provider session so the next turn re-establishes context under
+    /// the new account.
+    pub fn set_account_label(&mut self, label: Option<String>) -> Result<()> {
+        self.provider.set_account_label(label)?;
+        self.reset_provider_session();
+        self.log_env_snapshot("set_account_label");
+        Ok(())
+    }
+
+    /// Atomically switch this session's account and model together. This is the
+    /// provider-crossing case where the new provider does not serve the current
+    /// model, so account and model must move as one step. The model spec is
+    /// applied first (which activates the target provider runtime and may cross
+    /// providers), then the account is pinned on that now-active runtime.
+    pub fn switch_account_and_model(&mut self, label: Option<String>, model: &str) -> Result<()> {
+        self.set_model_from_provider_state_event(
+            model,
+            crate::provider::ProviderModelSelectionSource::User,
+        )?;
+        self.provider.set_account_label(label)?;
+        self.reset_provider_session();
+        self.log_env_snapshot("switch_account_and_model");
+        Ok(())
+    }
+
     pub(crate) fn set_route_selection_from_auth(
         &mut self,
         selection: &crate::provider::RouteSelection,
