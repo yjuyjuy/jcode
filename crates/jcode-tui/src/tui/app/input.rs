@@ -1330,9 +1330,47 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
     result
 }
 
+/// Activate a registered skill invocation so a QUEUED entry carries the skill,
+/// returning only the trailing prompt to actually queue.
+///
+/// A queued message is later drained as a plain user turn, and the skill prompt
+/// reaches the model only through `app.active_skill` at turn-build time. So a
+/// `/skill prompt` that is queued must activate the skill NOW (persisting in
+/// `active_skill` until the drain) and queue only the trailing prompt, mirroring
+/// the immediate-submit skill path. `raw` is the untaken input text. Returns the
+/// text that should be queued: the trailing prompt for a queueable skill turn,
+/// otherwise `fallback` unchanged.
+pub(super) fn activate_queued_skill_and_extract_prompt(
+    app: &mut App,
+    raw: &str,
+    fallback: String,
+) -> String {
+    let snapshot = app.current_skills_snapshot();
+    let Some(invocation) = snapshot.resolve_invocation(raw) else {
+        return fallback;
+    };
+    let (Some(prompt), Some(skill)) = (invocation.prompt, snapshot.get(invocation.name)) else {
+        return fallback;
+    };
+    let prompt = prompt.to_string();
+    let skill_name = invocation.name.to_string();
+    app.active_skill = Some(skill_name);
+    app.push_display_message(DisplayMessage {
+        role: "system".to_string(),
+        content: format!("Activated skill: {} - {}", skill.name, skill.description),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    });
+    prompt
+}
+
 pub(super) fn queue_message(app: &mut App) {
+    let raw = app.input.trim().to_string();
     let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    let queued = activate_queued_skill_and_extract_prompt(app, &raw, prepared.expanded);
+    app.queued_messages.push(queued);
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1377,11 +1415,41 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     had_pending
 }
 
+/// A `/`-prefixed input that resolves to a REGISTERED skill AND carries a
+/// trailing prompt. That form is a real model turn (the skill activates and the
+/// prompt is sent), so mid-turn it must follow `queue_mode` like ordinary text
+/// instead of force-submitting into the busy turn. A bare `/skill` with no
+/// prompt (pure activation, no turn), an unknown slash, and every builtin/local
+/// slash command are NOT queueable turns and keep their immediate behavior.
+fn input_is_queueable_skill_turn(app: &App) -> bool {
+    let trimmed = app.input.trim();
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+    if parse_dropped_paths(trimmed).is_some() {
+        return false;
+    }
+    let snapshot = app.current_skills_snapshot();
+    let Some(invocation) = snapshot.resolve_invocation(trimmed) else {
+        return false;
+    };
+    invocation.prompt.is_some() && snapshot.get(invocation.name).is_some()
+}
+
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     if !app.is_processing {
         return SendAction::Submit;
     }
-    if app.input.trim().starts_with('/') || app.input.trim().starts_with('!') {
+    let trimmed = app.input.trim();
+    // A `!` shell command and every builtin/local slash command must run
+    // immediately even mid-turn. A registered skill invocation that carries a
+    // trailing prompt is a real model turn, though, so it follows queue_mode
+    // like ordinary text instead of force-submitting into the busy turn (which
+    // the server rejects with "Already processing a message").
+    if trimmed.starts_with('!') {
+        return SendAction::Submit;
+    }
+    if trimmed.starts_with('/') && !input_is_queueable_skill_turn(app) {
         return SendAction::Submit;
     }
     if alternate_shortcut {

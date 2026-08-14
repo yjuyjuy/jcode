@@ -790,6 +790,47 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
+        Request::ListSessions { id } => {
+            super::session_control::handle_list_sessions(
+                id,
+                sessions,
+                swarm_members,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::SwitchSessionAccount {
+            id,
+            session_id: target_session_id,
+            account,
+        } => {
+            super::session_control::handle_switch_session_account(
+                id,
+                target_session_id,
+                account,
+                sessions,
+                swarm_members,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::SwitchSessionAccountModel {
+            id,
+            session_id: target_session_id,
+            account,
+            model,
+        } => {
+            super::session_control::handle_switch_session_account_model(
+                id,
+                target_session_id,
+                account,
+                model,
+                sessions,
+                swarm_members,
+                &client_event_tx,
+            )
+            .await;
+        }
         other => {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id: other.id(),
