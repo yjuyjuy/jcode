@@ -38,8 +38,9 @@ use crate::memory_types::{
     normalize_memory_search_text, normalize_search_text, skill_retrieval_bonus,
 };
 pub use activity::{
-    activity_snapshot, add_event, apply_remote_activity_snapshot, check_staleness, clear_activity,
-    get_activity, pipeline_start, pipeline_update, record_injected_prompt, set_state,
+    ExtractionHealth, activity_snapshot, add_event, apply_remote_activity_snapshot,
+    check_staleness, clear_activity, clear_extraction_health, extraction_health, get_activity,
+    pipeline_start, pipeline_update, record_extraction_failure, record_injected_prompt, set_state,
 };
 use cache::{cache_graph, cached_graph};
 pub use pending::{

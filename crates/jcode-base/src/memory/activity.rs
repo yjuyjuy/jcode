@@ -12,6 +12,74 @@ const MAX_RECENT_EVENTS: usize = 10;
 /// Staleness timeout: auto-reset to Idle if state has been non-Idle for this long
 const STALENESS_TIMEOUT_SECS: u64 = 10;
 
+/// Durable record that the memory extraction sidecar is failing.
+///
+/// Distinct from `MEMORY_ACTIVITY`, whose transient state auto-resets to Idle
+/// after a few seconds. When extraction 404s or otherwise errors, the failure
+/// is only logged and the pipeline silently produces zero memories, so a broken
+/// backend looks identical to "nothing worth remembering". This record persists
+/// the outage so the user can be told plainly (via `/memory status`) that the
+/// memory layer is enabled but not actually working, and clears on the first
+/// successful extraction.
+static EXTRACTION_HEALTH: Mutex<Option<ExtractionHealth>> = Mutex::new(None);
+
+/// Persistent extraction-outage record. Absent = healthy (or never run yet).
+#[derive(Clone, Debug)]
+pub struct ExtractionHealth {
+    /// Human-readable error from the most recent failed extraction.
+    pub last_error: String,
+    /// When extraction first started failing in the current outage streak.
+    pub since: Instant,
+    /// Consecutive failed extractions since the last success.
+    pub consecutive_failures: u32,
+}
+
+/// Record that a memory extraction attempt failed.
+///
+/// Logs loudly at `warn` (extraction failures were previously only `info`, i.e.
+/// invisible in normal use) and updates the durable outage record so a
+/// user-facing surface can report the subsystem is down.
+pub fn record_extraction_failure(error: &str) {
+    crate::logging::warn(&format!(
+        "Memory extraction failing - the memory subsystem is enabled but not storing anything: {}",
+        error
+    ));
+    if let Ok(mut guard) = EXTRACTION_HEALTH.lock() {
+        match guard.as_mut() {
+            Some(health) => {
+                health.last_error = error.to_string();
+                health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+            }
+            None => {
+                *guard = Some(ExtractionHealth {
+                    last_error: error.to_string(),
+                    since: Instant::now(),
+                    consecutive_failures: 1,
+                });
+            }
+        }
+    }
+}
+
+/// Clear the extraction-outage record after a successful extraction.
+pub fn clear_extraction_health() {
+    if let Ok(mut guard) = EXTRACTION_HEALTH.lock()
+        && guard.is_some()
+    {
+        crate::logging::info("Memory extraction recovered");
+        *guard = None;
+    }
+}
+
+/// Read the current extraction-outage record, if extraction is currently failing.
+pub fn extraction_health() -> Option<ExtractionHealth> {
+    if let Ok(guard) = EXTRACTION_HEALTH.lock() {
+        guard.clone()
+    } else {
+        None
+    }
+}
+
 /// Get current memory activity state
 pub fn get_activity() -> Option<MemoryActivity> {
     MEMORY_ACTIVITY.lock().ok().and_then(|guard| guard.clone())
@@ -395,5 +463,36 @@ fn from_snapshot_step_result(snapshot: &crate::protocol::MemoryStepResultSnapsho
     StepResult {
         summary: snapshot.summary.clone(),
         latency_ms: snapshot.latency_ms,
+    }
+}
+
+#[cfg(test)]
+mod extraction_health_tests {
+    use super::*;
+
+    #[test]
+    fn failure_records_then_success_clears() {
+        // Start from a clean slate (the static is process-global).
+        clear_extraction_health();
+        assert!(extraction_health().is_none());
+
+        record_extraction_failure("HTTP 404 Not Found");
+        let health = extraction_health().expect("outage recorded");
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.last_error, "HTTP 404 Not Found");
+
+        record_extraction_failure("HTTP 404 Not Found");
+        assert_eq!(
+            extraction_health()
+                .expect("still failing")
+                .consecutive_failures,
+            2
+        );
+
+        clear_extraction_health();
+        assert!(
+            extraction_health().is_none(),
+            "a successful extraction clears the outage"
+        );
     }
 }

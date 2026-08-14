@@ -1858,6 +1858,13 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 "disabled"
             }
         )));
+        if let Some(health) = crate::memory::extraction_health() {
+            let mins = health.since.elapsed().as_secs() / 60;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Memory extraction is FAILING - enabled but not storing anything ({} consecutive failures over ~{}m). Last error: {}",
+                health.consecutive_failures, mins, health.last_error
+            )));
+        }
         return true;
     }
 
