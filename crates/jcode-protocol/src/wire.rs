@@ -727,6 +727,45 @@ pub enum Request {
         #[serde(default = "default_true")]
         wake: bool,
     },
+
+    /// List live sessions with provider/account/model for the account-switch
+    /// control surface (ADR 0031). A lightweight, subscription-free query the
+    /// account orchestrator uses to enumerate switch targets.
+    #[serde(rename = "list_sessions")]
+    ListSessions { id: u64 },
+
+    /// Switch one or all live sessions to a different account for the active
+    /// provider, without a model change. `session_id: None` targets every live
+    /// session. The switch is adopted on each session's next turn and never
+    /// interrupts a turn already running (drain semantics).
+    #[serde(rename = "switch_session_account")]
+    SwitchSessionAccount {
+        id: u64,
+        /// Target session. `None` switches all live sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Account label to pin (e.g. "claude" / "claude-2" / "openai-2").
+        account: String,
+    },
+
+    /// Atomically switch one or all live sessions to a different account AND
+    /// model together. This is the provider-crossing case where the new
+    /// provider does not serve the current model, so both move as one step.
+    /// `session_id: None` targets every live session. Adopted on the next turn;
+    /// never interrupts a running turn.
+    #[serde(rename = "switch_session_account_model")]
+    SwitchSessionAccountModel {
+        id: u64,
+        /// Target session. `None` switches all live sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Account label to pin.
+        account: String,
+        /// Model spec string for the new model, including any provider routing
+        /// prefix (e.g. "claude-api:claude-fable-5", "openai-oauth:gpt-5").
+        /// Parsed by the active provider orchestrator, so it can cross providers.
+        model: String,
+    },
 }
 
 /// Server event sent to client
@@ -1466,4 +1505,62 @@ pub enum ServerEvent {
         /// Tool call ID this is associated with
         tool_call_id: String,
     },
+
+    /// Response to [`Request::ListSessions`]: live sessions with their current
+    /// provider, account, and model for the account-switch control surface.
+    #[serde(rename = "session_list")]
+    SessionList {
+        id: u64,
+        sessions: Vec<SessionControlInfo>,
+    },
+
+    /// Response to [`Request::SwitchSessionAccount`] and
+    /// [`Request::SwitchSessionAccountModel`]: per-session success/failure so an
+    /// external orchestrator can report exactly which sessions switched.
+    #[serde(rename = "session_switch_result")]
+    SessionSwitchResult {
+        id: u64,
+        results: Vec<SessionSwitchOutcome>,
+    },
+}
+
+/// One live session's control-surface identity: provider, account, and model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionControlInfo {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Account label the session's active provider is pinned to, or `None` when
+    /// it follows the process-global active account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// True when a turn is currently running for this session. A switch is still
+    /// accepted; it is adopted on the next turn (drain semantics).
+    #[serde(default)]
+    pub is_processing: bool,
+}
+
+/// Per-session outcome of an account (and optional model) switch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSwitchOutcome {
+    pub session_id: String,
+    /// True when the switch was applied (or queued to apply on the next turn).
+    pub ok: bool,
+    /// The account label the session now targets, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The model the session now targets, when a model switch was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// True when the switch was accepted but deferred because a turn was in
+    /// flight; it applies on that session's next turn.
+    #[serde(default)]
+    pub deferred: bool,
+    /// Failure reason when `ok` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

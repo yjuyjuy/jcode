@@ -340,4 +340,96 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
     }
+
+    /// List live sessions with their provider, account, and model. This is a
+    /// lightweight, subscription-free control request the account-switch
+    /// orchestrator uses to enumerate switch targets.
+    pub async fn list_sessions(&mut self) -> Result<Vec<crate::protocol::SessionControlInfo>> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::ListSessions { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        loop {
+            match self.read_event().await? {
+                ServerEvent::Ack { id: ack_id } if ack_id == id => continue,
+                ServerEvent::SessionList {
+                    id: event_id,
+                    sessions,
+                } if event_id == id => return Ok(sessions),
+                ServerEvent::Error {
+                    id: error_id,
+                    message,
+                    ..
+                } if error_id == id => anyhow::bail!("{message}"),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Switch one session (or all live sessions when `session_id` is `None`) to
+    /// a different account for the active provider. Returns the per-session
+    /// outcomes so the caller can report exactly which sessions switched.
+    pub async fn switch_session_account(
+        &mut self,
+        session_id: Option<&str>,
+        account: &str,
+    ) -> Result<Vec<crate::protocol::SessionSwitchOutcome>> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::SwitchSessionAccount {
+            id,
+            session_id: session_id.map(str::to_string),
+            account: account.to_string(),
+        };
+        self.send_switch_request(id, &request).await
+    }
+
+    /// Atomically switch one session (or all live sessions) to a different
+    /// account AND model together (the provider-crossing case).
+    pub async fn switch_session_account_model(
+        &mut self,
+        session_id: Option<&str>,
+        account: &str,
+        model: &str,
+    ) -> Result<Vec<crate::protocol::SessionSwitchOutcome>> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::SwitchSessionAccountModel {
+            id,
+            session_id: session_id.map(str::to_string),
+            account: account.to_string(),
+            model: model.to_string(),
+        };
+        self.send_switch_request(id, &request).await
+    }
+
+    async fn send_switch_request(
+        &mut self,
+        id: u64,
+        request: &Request,
+    ) -> Result<Vec<crate::protocol::SessionSwitchOutcome>> {
+        let json = serde_json::to_string(request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        loop {
+            match self.read_event().await? {
+                ServerEvent::Ack { id: ack_id } if ack_id == id => continue,
+                ServerEvent::SessionSwitchResult {
+                    id: event_id,
+                    results,
+                } if event_id == id => return Ok(results),
+                ServerEvent::Error {
+                    id: error_id,
+                    message,
+                    ..
+                } if error_id == id => anyhow::bail!("{message}"),
+                _ => continue,
+            }
+        }
+    }
 }

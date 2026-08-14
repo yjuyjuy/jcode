@@ -281,6 +281,9 @@ kv_cache_miss_notices = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
+# Drain queued messages one per turn instead of combining every queued message
+# into a single request. Toggle per session with Ctrl+N.
+queue_drain_one_per_turn = false
 
 [websearch]
 # Preferred websearch engine: "duckduckgo", "bing", or "searxng".
@@ -366,6 +369,12 @@ preserve_reasoning_context = true
 # capacity will be needed soon. Default: true. Set false for exhaustion-only
 # switching. Overridable via JCODE_PACE_AWARE_ACCOUNT_BALANCING.
 # pace_aware_account_balancing = false
+# Poll-driven account re-evaluation cadence, in seconds. Between turns jcode
+# re-evaluates same-provider account selection against current usage so a
+# priority strategy can return to a reset primary and fall back off a capped one,
+# and pace balancing keeps rebalancing, instead of only selecting at startup and
+# explicit switch. Only overridable via the env var JCODE_ACCOUNT_REEVAL_INTERVAL_SECS
+# (default 60; 0 disables poll-driven re-evaluation).
 # How to pick among multiple same-provider accounts while more than one is live.
 # "pace" (default) = the consume-first pace balancing above (also gated by
 #   pace_aware_account_balancing).

@@ -1330,9 +1330,47 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
     result
 }
 
+/// Activate a registered skill invocation so a QUEUED entry carries the skill,
+/// returning only the trailing prompt to actually queue.
+///
+/// A queued message is later drained as a plain user turn, and the skill prompt
+/// reaches the model only through `app.active_skill` at turn-build time. So a
+/// `/skill prompt` that is queued must activate the skill NOW (persisting in
+/// `active_skill` until the drain) and queue only the trailing prompt, mirroring
+/// the immediate-submit skill path. `raw` is the untaken input text. Returns the
+/// text that should be queued: the trailing prompt for a queueable skill turn,
+/// otherwise `fallback` unchanged.
+pub(super) fn activate_queued_skill_and_extract_prompt(
+    app: &mut App,
+    raw: &str,
+    fallback: String,
+) -> String {
+    let snapshot = app.current_skills_snapshot();
+    let Some(invocation) = snapshot.resolve_invocation(raw) else {
+        return fallback;
+    };
+    let (Some(prompt), Some(skill)) = (invocation.prompt, snapshot.get(invocation.name)) else {
+        return fallback;
+    };
+    let prompt = prompt.to_string();
+    let skill_name = invocation.name.to_string();
+    app.active_skill = Some(skill_name);
+    app.push_display_message(DisplayMessage {
+        role: "system".to_string(),
+        content: format!("Activated skill: {} - {}", skill.name, skill.description),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    });
+    prompt
+}
+
 pub(super) fn queue_message(app: &mut App) {
+    let raw = app.input.trim().to_string();
     let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    let queued = activate_queued_skill_and_extract_prompt(app, &raw, prepared.expanded);
+    app.queued_messages.push(queued);
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1377,11 +1415,41 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     had_pending
 }
 
+/// A `/`-prefixed input that resolves to a REGISTERED skill AND carries a
+/// trailing prompt. That form is a real model turn (the skill activates and the
+/// prompt is sent), so mid-turn it must follow `queue_mode` like ordinary text
+/// instead of force-submitting into the busy turn. A bare `/skill` with no
+/// prompt (pure activation, no turn), an unknown slash, and every builtin/local
+/// slash command are NOT queueable turns and keep their immediate behavior.
+fn input_is_queueable_skill_turn(app: &App) -> bool {
+    let trimmed = app.input.trim();
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+    if parse_dropped_paths(trimmed).is_some() {
+        return false;
+    }
+    let snapshot = app.current_skills_snapshot();
+    let Some(invocation) = snapshot.resolve_invocation(trimmed) else {
+        return false;
+    };
+    invocation.prompt.is_some() && snapshot.get(invocation.name).is_some()
+}
+
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     if !app.is_processing {
         return SendAction::Submit;
     }
-    if app.input.trim().starts_with('/') || app.input.trim().starts_with('!') {
+    let trimmed = app.input.trim();
+    // A `!` shell command and every builtin/local slash command must run
+    // immediately even mid-turn. A registered skill invocation that carries a
+    // trailing prompt is a real model turn, though, so it follows queue_mode
+    // like ordinary text instead of force-submitting into the busy turn (which
+    // the server rejects with "Already processing a message").
+    if trimmed.starts_with('!') {
+        return SendAction::Submit;
+    }
+    if trimmed.starts_with('/') && !input_is_queueable_skill_turn(app) {
         return SendAction::Submit;
     }
     if alternate_shortcut {
@@ -1848,6 +1916,16 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
                 "Queue mode: messages wait until response completes"
             } else {
                 "Immediate mode: messages send next (no interrupt)"
+            };
+            app.set_status_notice(mode_str);
+            true
+        }
+        KeyCode::Char('n') => {
+            app.queue_drain_one_per_turn = !app.queue_drain_one_per_turn;
+            let mode_str = if app.queue_drain_one_per_turn {
+                "Queue drain: one message per turn"
+            } else {
+                "Queue drain: combine queued messages into one turn"
             };
             app.set_status_notice(mode_str);
             true
@@ -3743,6 +3821,28 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Take the next batch of queued messages to drain as one turn, plus the
+    /// hidden `[SYSTEM: ...]` reminders that ride with it.
+    ///
+    /// Default (combine) mode takes the entire queue at once, so every queued
+    /// message is joined into a single request. One-per-turn mode
+    /// (`queue_drain_one_per_turn`) instead takes only the first queued message,
+    /// leaving the rest for later `process_queued_messages` loop iterations so
+    /// each is sent as its own turn. Either way the currently-pending hidden
+    /// reminders are taken with the batch, since a reminder is not itself a user
+    /// turn.
+    pub(super) fn take_next_queued_batch(&mut self) -> (Vec<String>, Vec<String>) {
+        if self.queue_drain_one_per_turn && !self.queued_messages.is_empty() {
+            let first = self.queued_messages.remove(0);
+            let hidden = std::mem::take(&mut self.hidden_queued_system_messages);
+            (vec![first], hidden)
+        } else {
+            let queued = std::mem::take(&mut self.queued_messages);
+            let hidden = std::mem::take(&mut self.hidden_queued_system_messages);
+            (queued, hidden)
+        }
+    }
+
     /// Process all queued messages (combined into a single request)
     /// Loops until queue is empty (in case more messages are queued during processing)
     pub(super) async fn process_queued_messages(
@@ -3753,8 +3853,13 @@ impl App {
         while !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty() {
             // Combine all currently queued messages into one, treating [SYSTEM: ...]
             // startup continuations as system reminders rather than user turns.
-            let queued_messages = std::mem::take(&mut self.queued_messages);
-            let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
+            //
+            // In one-per-turn mode, pop only the FIRST queued message this
+            // iteration (its associated hidden reminders ride with it) and let
+            // the `while` loop send the rest as their own turns. When only
+            // hidden reminders remain, or the mode is off, fall back to draining
+            // the whole batch into a single combined turn.
+            let (queued_messages, hidden_reminders) = self.take_next_queued_batch();
             let (messages, reminder, display_system_messages) =
                 super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
             let combined = messages.join("\n\n");

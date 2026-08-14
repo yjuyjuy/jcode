@@ -329,6 +329,15 @@ pub trait Provider: Send + Sync {
     /// Invalidate any cached credentials.
     async fn invalidate_credentials(&self) {}
 
+    /// Re-evaluate multi-account selection against current usage and switch the
+    /// active account if the configured strategy warrants it, invalidating cached
+    /// credentials so the next request uses the new account. Default no-op for
+    /// providers without multi-account support. Implementations must be cheap to
+    /// call often (they are invoked at turn boundaries) and internally rate-limit
+    /// the expensive usage probe, so a caller can invoke this every turn without
+    /// adding per-turn latency.
+    async fn reselect_account(&self) {}
+
     /// Set Copilot premium request conservation mode.
     fn set_premium_mode(&self, _mode: PremiumMode) {}
 
@@ -346,6 +355,34 @@ pub trait Provider: Send + Sync {
     /// Pin the OAuth-vs-API-key credential route for dual-auth providers.
     fn set_credential_mode(&self, _mode: CredentialMode) -> Result<()> {
         Ok(())
+    }
+
+    /// The account label this provider instance is currently pinned to, if any.
+    ///
+    /// Account selection is otherwise process-global (the runtime override plus
+    /// the active label in `auth.json`), which only affects new sessions. A
+    /// per-instance pin lets a single live session use a different account than
+    /// its siblings without disturbing them, which is what the account-switch
+    /// control surface (ADR 0031) needs. `None` means the instance follows the
+    /// process-global active account.
+    fn account_label(&self) -> Option<String> {
+        None
+    }
+
+    /// Pin this provider instance to a specific account label.
+    ///
+    /// Passing `None` clears the pin so the instance follows the process-global
+    /// active account again. Providers that do not support multiple accounts
+    /// reject a non-`None` label. The pin takes effect on the next credential
+    /// load; in-flight requests are never disturbed, so a live turn keeps using
+    /// the account it started with and the switch is adopted on the next turn.
+    fn set_account_label(&self, label: Option<String>) -> Result<()> {
+        match label {
+            None => Ok(()),
+            Some(label) => Err(anyhow::anyhow!(
+                "This provider does not support account switching (requested '{label}')"
+            )),
+        }
     }
 
     /// Re-read credentials from disk immediately (e.g. after an OAuth refresh

@@ -379,6 +379,25 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 clear,
                 json,
             } => commands::run_session_rename_command(&session, name.as_deref(), clear, json)?,
+            SessionCommand::List { json } => {
+                commands::run_session_list_command(json).await?;
+            }
+            SessionCommand::SwitchAccount {
+                session,
+                all,
+                account,
+                model,
+                json,
+            } => {
+                commands::run_session_switch_account_command(
+                    session,
+                    all,
+                    &account,
+                    model.as_deref(),
+                    json,
+                )
+                .await?;
+            }
         },
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;

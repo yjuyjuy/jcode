@@ -352,6 +352,11 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         "queue_mode_toggle",
         "toggle queue mode",
     ));
+    out.push(KnownHotkey::new(
+        ctrl('n'),
+        "queue_drain_one_per_turn_toggle",
+        "toggle draining queued messages one per turn",
+    ));
     out.push(KnownHotkey::quiet(
         ctrl('v'),
         "paste",
