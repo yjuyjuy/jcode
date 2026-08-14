@@ -174,6 +174,7 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 mod wire;
 pub use wire::TaskGraphNodeSpec;
 pub use wire::{Request, ServerEvent};
+pub use wire::{SessionControlInfo, SessionSwitchOutcome};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -638,6 +639,9 @@ impl Request {
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
+            Request::ListSessions { id } => *id,
+            Request::SwitchSessionAccount { id, .. } => *id,
+            Request::SwitchSessionAccountModel { id, .. } => *id,
         }
     }
 
@@ -674,6 +678,9 @@ impl Request {
                 | Request::CommSubscribeChannel { .. }
                 | Request::CommUnsubscribeChannel { .. }
                 | Request::CommAwaitMembers { .. }
+                | Request::ListSessions { .. }
+                | Request::SwitchSessionAccount { .. }
+                | Request::SwitchSessionAccountModel { .. }
         )
     }
 }

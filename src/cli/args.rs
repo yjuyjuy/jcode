@@ -887,6 +887,48 @@ pub(crate) enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// List live sessions with their provider, account, and model.
+    ///
+    /// A headless control surface for the account-switch orchestrator (ADR
+    /// 0031). Queries the running daemon over its socket without a TUI.
+    List {
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Switch a live session's account (and optionally its model) without
+    /// restarting or interrupting a running turn.
+    ///
+    /// Targets one session by ID, or every live session with `--all`. When the
+    /// new provider does not serve the current model, pass `--model` to switch
+    /// account and model together atomically. The switch is adopted on the
+    /// session's next turn (a turn in flight is never interrupted).
+    SwitchAccount {
+        /// Session ID or short name to switch. Omit and pass `--all` to switch
+        /// every live session.
+        #[arg(required_unless_present = "all")]
+        session: Option<String>,
+
+        /// Switch every live session instead of a single one.
+        #[arg(long, conflicts_with = "session")]
+        all: bool,
+
+        /// Account label to switch to (e.g. "claude", "claude-2", "openai-2").
+        #[arg(long)]
+        account: String,
+
+        /// Model spec to switch to atomically with the account, including any
+        /// provider routing prefix (e.g. "claude-api:claude-fable-5",
+        /// "openai-oauth:gpt-5"). Use for the provider-crossing case.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

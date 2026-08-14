@@ -33,6 +33,14 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
 
+        // Poll-driven, cooldown-gated account re-evaluation. Cheap to call every
+        // turn (the provider internally rate-limits the expensive usage probe),
+        // and a no-op for providers without multi-account support. This is what
+        // lets a priority strategy return to a reset primary and fall back off a
+        // capped one, and pace balancing keep rebalancing, between turns rather
+        // than only at provider construction and explicit provider switch.
+        self.provider.reselect_account().await;
+
         loop {
             // Do not start another provider request once a cancel has been
             // observed; the loop is re-entered by several recovery paths

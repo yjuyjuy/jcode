@@ -760,6 +760,21 @@ impl Config {
                 self.provider.pace_aware_account_balancing = enabled;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_ACCOUNT_SELECTION_STRATEGY") {
+            if let Some(strategy) = AccountSelectionStrategy::parse(&v) {
+                self.provider.account_selection_strategy = strategy;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_ACCOUNT_PRIORITY") {
+            let order: Vec<String> = v
+                .split(',')
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            if !order.is_empty() {
+                self.provider.account_priority = order;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_STREAM_IDLE_TIMEOUT_SECS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 if parsed > 0 {

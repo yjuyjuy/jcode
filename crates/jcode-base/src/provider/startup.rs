@@ -1,5 +1,65 @@
 use super::*;
 
+/// Minimum seconds between poll-driven account re-evaluations.
+///
+/// Defaults to 60 seconds; overridable via `JCODE_ACCOUNT_REEVAL_INTERVAL_SECS`.
+/// `0` disables poll-driven re-evaluation entirely. A malformed value falls back
+/// to the default.
+fn account_reeval_interval_secs() -> u64 {
+    parse_account_reeval_interval(
+        std::env::var("JCODE_ACCOUNT_REEVAL_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Default poll-driven re-evaluation interval, in seconds.
+const DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS: u64 = 60;
+
+/// Pure parse of the re-eval interval override. `None` (unset) and a malformed
+/// value both fall back to [`DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS`]; a valid
+/// non-negative integer (including `0`, which disables) is honored.
+fn parse_account_reeval_interval(raw: Option<&str>) -> u64 {
+    match raw {
+        Some(value) => value
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS),
+        None => DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS,
+    }
+}
+
+#[cfg(test)]
+mod reeval_interval_tests {
+    use super::{DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS, parse_account_reeval_interval};
+
+    #[test]
+    fn unset_uses_default() {
+        assert_eq!(
+            parse_account_reeval_interval(None),
+            DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn malformed_uses_default() {
+        assert_eq!(
+            parse_account_reeval_interval(Some("not-a-number")),
+            DEFAULT_ACCOUNT_REEVAL_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn zero_disables() {
+        assert_eq!(parse_account_reeval_interval(Some("0")), 0);
+    }
+
+    #[test]
+    fn valid_value_is_honored() {
+        assert_eq!(parse_account_reeval_interval(Some("  120  ")), 120);
+    }
+}
+
 impl MultiProvider {
     pub(super) fn spawn_post_auth_model_refresh(
         &self,
@@ -482,6 +542,45 @@ impl MultiProvider {
         self.auto_select_multi_account_for_provider(self.active_provider());
     }
 
+    /// Poll-driven account re-evaluation, safe to call at every turn boundary.
+    ///
+    /// Runs the same account-selection logic as [`auto_select_active_multi_account`]
+    /// (so it honors the configured strategy: pace, priority, or exhaustion-only),
+    /// but coarsely time-gates the expensive per-account usage probe so calling it
+    /// once per turn never adds per-turn latency. This is what makes a priority
+    /// strategy's "return on reset" and "fall back on cap", and pace balancing's
+    /// ongoing rebalance, actually fire AFTER startup instead of only at provider
+    /// construction and explicit provider switch.
+    ///
+    /// The re-evaluation interval defaults to 60 seconds and is overridable via
+    /// `JCODE_ACCOUNT_REEVAL_INTERVAL_SECS`. A value of `0` disables the poll-driven
+    /// re-evaluation entirely (falling back to construction-time and explicit-switch
+    /// selection only).
+    pub fn reevaluate_account_selection(&self) {
+        use std::sync::{LazyLock, Mutex};
+
+        let interval_secs = account_reeval_interval_secs();
+        if interval_secs == 0 {
+            return;
+        }
+
+        static LAST_REEVAL: LazyLock<Mutex<Option<f64>>> = LazyLock::new(|| Mutex::new(None));
+        let now = chrono::Utc::now().timestamp() as f64;
+        {
+            let mut last = LAST_REEVAL
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(prev) = *last
+                && now - prev < interval_secs as f64
+            {
+                return;
+            }
+            *last = Some(now);
+        }
+
+        self.auto_select_active_multi_account();
+    }
+
     /// Backward-compatible wrapper for the Anthropic-specific startup rotation entrypoint.
     pub fn auto_select_anthropic_account(&self) {
         self.auto_select_multi_account_for_provider(ActiveProvider::Claude);
@@ -510,10 +609,10 @@ impl MultiProvider {
         }
         if !probe.current_exhausted() {
             // Not exhausted: the exhaustion-only failover below has nothing to
-            // do. Try pace-aware same-pace balancing instead (opt-out), which
-            // proactively consumes the soonest-resetting weekly quota first and
-            // primes an unopened 5-hour window when capacity will be needed soon.
-            self.maybe_pace_balance(provider, &probe);
+            // do. Try the configured same-provider rebalancing strategy instead
+            // (pace-aware consume-first, ranked priority, or nothing), which can
+            // proactively move the active account before it is fully exhausted.
+            self.maybe_rebalance(provider, &probe);
             return;
         }
 
@@ -589,6 +688,118 @@ impl MultiProvider {
 
         let usage = crate::usage::get_sync();
         usage.five_hour >= 0.99 && usage.seven_day >= 0.99
+    }
+
+    /// Same-provider rebalancing for a not-yet-exhausted provider, dispatched on
+    /// the configured [`account_selection_strategy`]. `Pace` (the shipped
+    /// default) keeps the consume-first balancing; `Priority` prefers the
+    /// highest-ranked live account; `ExhaustionOnly` does nothing here and leaves
+    /// the exhaustion-only failover path as the only mover.
+    ///
+    /// [`account_selection_strategy`]: jcode_config_types::ProviderConfig::account_selection_strategy
+    fn maybe_rebalance(&self, provider: ActiveProvider, probe: &crate::usage::AccountUsageProbe) {
+        use jcode_config_types::AccountSelectionStrategy;
+        match crate::config::Config::load()
+            .provider
+            .account_selection_strategy
+        {
+            AccountSelectionStrategy::Pace => self.maybe_pace_balance(provider, probe),
+            AccountSelectionStrategy::Priority => self.maybe_priority_select(provider, probe),
+            AccountSelectionStrategy::ExhaustionOnly => {}
+        }
+    }
+
+    /// Ranked-priority same-provider selection for a not-yet-exhausted provider.
+    ///
+    /// Asks the priority model (see [`crate::usage::pace::select_priority_target`])
+    /// for the highest-ranked live account, keyed on stable identity (email, then
+    /// label) from `[provider].account_priority`. A `Switch` or `Failover` sets
+    /// the active-account override through the same [`Self::apply_account_override`]
+    /// path the pace balancer and exhaustion failover use, so it never touches
+    /// credentials beyond that override/invalidate path. An empty priority list
+    /// leaves nothing to rank, so the selector simply stays put.
+    fn maybe_priority_select(
+        &self,
+        provider: ActiveProvider,
+        probe: &crate::usage::AccountUsageProbe,
+    ) {
+        use std::sync::{LazyLock, Mutex};
+
+        // Only Anthropic exposes the per-account 5h/7d window data the priority
+        // thresholds need; OpenAI is handled by the exhaustion path only for now.
+        if provider != ActiveProvider::Claude {
+            return;
+        }
+
+        let priority_order = crate::config::Config::load()
+            .provider
+            .account_priority
+            .clone();
+        if priority_order.is_empty() {
+            // Nothing to rank: leave the exhaustion-only failover as the mover.
+            return;
+        }
+
+        static LAST_SWITCH: LazyLock<Mutex<std::collections::HashMap<&'static str, f64>>> =
+            LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+        let provider_key = Self::provider_label(provider);
+        let now = chrono::Utc::now();
+        let cfg = crate::usage::BalanceConfig::default();
+        let state = crate::usage::BalanceState {
+            last_switch_epoch: LAST_SWITCH
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(provider_key)
+                .copied(),
+        };
+
+        let decision = probe.priority_decision(&priority_order, cfg, state, now);
+        let (to, human_reason) = match &decision {
+            crate::usage::BalanceDecision::Switch { to, reason } => {
+                let human = match *reason {
+                    "priority-return" => "higher-priority account available again",
+                    "priority-cap" => "current account capped",
+                    _ => "priority rebalance",
+                };
+                (to.clone(), human)
+            }
+            crate::usage::BalanceDecision::Failover { to } => {
+                (to.clone(), "current account exhausted")
+            }
+            // Stay / Blocked / AllExhausted: nothing to do this round.
+            _ => return,
+        };
+
+        crate::logging::info(&format!(
+            "{} priority selection: moving {} -> {} ({})",
+            probe.provider.display_name(),
+            probe.current_label,
+            to,
+            human_reason
+        ));
+        self.apply_account_override(provider, &to);
+        LAST_SWITCH
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(provider_key, now.timestamp() as f64);
+
+        let glyph = if human_reason == "higher-priority account available again" {
+            "↩"
+        } else {
+            "⤵"
+        };
+        let notice = format!(
+            "{} Priority-switched {} account: **{}** -> **{}** ({})",
+            glyph,
+            probe.provider.display_name(),
+            probe.current_label,
+            to,
+            human_reason
+        );
+        self.startup_notices
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(notice);
     }
 
     /// Pace-aware same-pace balancing for a not-yet-exhausted provider.
