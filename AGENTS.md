@@ -42,6 +42,13 @@ Two things that waste time otherwise:
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
 
+## Subscription usage cache
+
+Usage fetching lives in `crates/jcode-base/src/usage/`.
+Two layers back the Anthropic and OpenAI usage fetchers: an in-memory per-session cache (L1, `usage/cache.rs`) and a host-wide on-disk cache shared with the `quota-axi` tool (L2, `usage/shared_cache.rs`).
+L2 is only read/written for the host-active account and only for successful fetches, so all error and 429 backoff stays owned by L1.
+The shared file (`${XDG_CACHE_HOME:-~/.cache}/quota-axi/quotas.json`, `schemaVersion` 1) must byte-match `quota-axi`; its window-identity contract is authoritative, so verify against that tool before changing the on-disk shape.
+
 ## Session account-switch control surface
 
 The daemon exposes a headless, subscription-free control surface for switching a
