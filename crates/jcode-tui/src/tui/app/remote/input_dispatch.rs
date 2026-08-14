@@ -266,6 +266,25 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         .and_then(|invocation| invocation.prompt)
         .unwrap_or(trailing_prompt)
         .to_string();
+
+    // A skill-with-prompt invocation is a real model turn. When it arrives while
+    // a turn is running, treat it like a normal message instead of force-
+    // submitting it into the busy server (which rejects it with "Already
+    // processing a message"): queue it in queue_mode, interleave it otherwise.
+    // The skill is already active (the bare-invocation submit above set it), so
+    // the queued/interleaved turn is sent under the active skill.
+    if app.is_processing {
+        if app.queue_mode {
+            app.push_display_message(DisplayMessage::user(expanded_prompt.clone()));
+            app.queued_messages.push(expanded_prompt);
+            app.set_status_notice("Skill queued");
+        } else {
+            app.send_interleave_now(expanded_prompt, prepared.images, remote)
+                .await;
+        }
+        return Ok(());
+    }
+
     submit_prepared_remote_input(
         app,
         remote,

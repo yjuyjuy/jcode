@@ -1025,6 +1025,67 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
 }
 
 #[test]
+fn skill_invocation_with_prompt_queues_when_processing_in_queue_mode() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp.path().join(".jcode/skills/queue-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: queue-skill\ndescription: Queue regression skill\n---\nUse it.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    // A turn is already running and the client is in queue mode.
+    app.is_processing = true;
+    app.queue_mode = true;
+    app.input = "/queue-skill do the thing".to_string();
+    app.cursor_pos = app.input.len();
+
+    // Enter routes through send_action -> Queue for a registered skill turn.
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    // The skill activates now (so the drained turn carries it) and only the
+    // trailing prompt is queued - the raw "/queue-skill ..." string must not be
+    // sent verbatim, or the drain would deliver it without the skill prompt.
+    assert_eq!(app.active_skill.as_deref(), Some("queue-skill"));
+    assert_eq!(app.queued_messages, vec!["do the thing".to_string()]);
+    // No new turn was force-submitted into the busy server.
+    assert!(!app.pending_turn);
+    assert!(app.input().is_empty());
+}
+
+#[test]
+fn bare_skill_activation_is_not_queued_while_processing() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp.path().join(".jcode/skills/bare-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: bare-skill\ndescription: Bare activation skill\n---\nUse it.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.is_processing = true;
+    app.queue_mode = true;
+    // No trailing prompt: pure activation, not a model turn, so it activates
+    // immediately and nothing is queued.
+    app.input = "/bare-skill".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.active_skill.as_deref(), Some("bare-skill"));
+    assert!(
+        app.queued_messages.is_empty(),
+        "a bare activation must not queue a turn"
+    );
+}
+
+#[test]
 fn unknown_skill_invocation_surfaces_error_and_sends_nothing() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
