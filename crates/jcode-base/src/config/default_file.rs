@@ -281,6 +281,9 @@ kv_cache_miss_notices = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
+# Drain queued messages one per turn instead of combining every queued message
+# into a single request. Toggle per session with Ctrl+N.
+queue_drain_one_per_turn = false
 
 [websearch]
 # Preferred websearch engine: "duckduckgo", "bing", or "searxng".

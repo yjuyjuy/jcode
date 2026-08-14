@@ -113,6 +113,66 @@ fn test_queue_message_combines_on_send() {
 }
 
 #[test]
+fn test_queue_drain_combine_takes_whole_batch_by_default() {
+    let mut app = create_test_app();
+    app.queued_messages.push("message one".to_string());
+    app.queued_messages.push("message two".to_string());
+    app.hidden_queued_system_messages
+        .push("[SYSTEM: reminder]".to_string());
+
+    // Default (combine) mode drains the whole queue in one batch.
+    assert!(!app.queue_drain_one_per_turn);
+    let (messages, hidden) = app.take_next_queued_batch();
+    assert_eq!(messages, vec!["message one", "message two"]);
+    assert_eq!(hidden, vec!["[SYSTEM: reminder]"]);
+    assert!(app.queued_messages.is_empty());
+    assert!(app.hidden_queued_system_messages.is_empty());
+}
+
+#[test]
+fn test_queue_drain_one_per_turn_pops_first_message_only() {
+    let mut app = create_test_app();
+    app.queue_drain_one_per_turn = true;
+    app.queued_messages.push("message one".to_string());
+    app.queued_messages.push("message two".to_string());
+    app.queued_messages.push("message three".to_string());
+    app.hidden_queued_system_messages
+        .push("[SYSTEM: reminder]".to_string());
+
+    // First drain: only the first message, with the pending hidden reminders.
+    let (messages, hidden) = app.take_next_queued_batch();
+    assert_eq!(messages, vec!["message one"]);
+    assert_eq!(hidden, vec!["[SYSTEM: reminder]"]);
+    assert_eq!(app.queued_messages, vec!["message two", "message three"]);
+    assert!(app.hidden_queued_system_messages.is_empty());
+
+    // Second drain: the next single message, no reminders left.
+    let (messages, hidden) = app.take_next_queued_batch();
+    assert_eq!(messages, vec!["message two"]);
+    assert!(hidden.is_empty());
+    assert_eq!(app.queued_messages, vec!["message three"]);
+
+    // Third drain: the last message.
+    let (messages, _) = app.take_next_queued_batch();
+    assert_eq!(messages, vec!["message three"]);
+    assert!(app.queued_messages.is_empty());
+}
+
+#[test]
+fn test_ctrl_n_toggles_queue_drain_one_per_turn() {
+    let mut app = create_test_app();
+    assert!(!app.queue_drain_one_per_turn);
+
+    app.handle_key(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.queue_drain_one_per_turn);
+
+    app.handle_key(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(!app.queue_drain_one_per_turn);
+}
+
+#[test]
 fn test_interleave_message_separate_from_queue() {
     let mut app = create_test_app();
     app.is_processing = true;

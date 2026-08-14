@@ -1130,6 +1130,12 @@ pub struct FeatureConfig {
     pub kv_cache_miss_notices: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
+    /// Drain queued messages one per turn instead of combining every queued
+    /// message into a single request. When true, each queued message (with its
+    /// associated hidden `[SYSTEM: ...]` reminders) is sent as its own turn. The
+    /// toggle hotkey still overrides this per session (default: false,
+    /// preserving the combine-on-send behavior).
+    pub queue_drain_one_per_turn: bool,
 }
 
 impl Default for FeatureConfig {
@@ -1143,6 +1149,7 @@ impl Default for FeatureConfig {
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
             update_channel: UpdateChannel::default(),
+            queue_drain_one_per_turn: false,
         }
     }
 }
