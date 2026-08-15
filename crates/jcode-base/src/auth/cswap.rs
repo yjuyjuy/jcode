@@ -124,7 +124,9 @@ mod tests {
             "active": { "number": 2, "email": "dev1@hyfin.app", "usage": {} }
         });
         assert_eq!(
-            json.get("active").and_then(|a| a.get("email")).and_then(|e| e.as_str()),
+            json.get("active")
+                .and_then(|a| a.get("email"))
+                .and_then(|e| e.as_str()),
             Some("dev1@hyfin.app")
         );
     }
@@ -146,12 +148,19 @@ mod tests {
             .iter()
             .filter_map(|account| {
                 let email = account.get("email")?.as_str()?.to_string();
-                let active = account.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
+                let active = account
+                    .get("active")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
                 let usage_status = account
                     .get("usageStatus")
                     .and_then(|s| s.as_str())
                     .map(str::to_string);
-                Some(CswapAccount { email, active, usage_status })
+                Some(CswapAccount {
+                    email,
+                    active,
+                    usage_status,
+                })
             })
             .collect();
         assert_eq!(accounts.len(), 2);

@@ -281,4 +281,3 @@ mod tests {
         assert!(gated, "a fresh switch record must gate an immediate retry");
     }
 }
-

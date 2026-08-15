@@ -1932,12 +1932,9 @@ async fn reload_credentials_for_reactive_switch(
     let needs_refresh = loaded.expires_at < now + 300_000 && !loaded.refresh_token.is_empty();
 
     let (access_token, refresh_token, expires_at) = if needs_refresh {
-        let refreshed =
-            oauth::refresh_claude_tokens_for_account(&loaded.refresh_token, new_label)
-                .await
-                .with_context(|| {
-                    format!("OAuth refresh failed for switched account '{new_label}'")
-                })?;
+        let refreshed = oauth::refresh_claude_tokens_for_account(&loaded.refresh_token, new_label)
+            .await
+            .with_context(|| format!("OAuth refresh failed for switched account '{new_label}'"))?;
         (
             refreshed.access_token,
             refreshed.refresh_token,
