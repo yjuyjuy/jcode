@@ -24,6 +24,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const TELEMETRY_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/event";
+const TRANSCRIPT_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/transcript";
 const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_QUEUE_CAPACITY: usize = 2048;
 const BLOCKING_INSTALL_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -33,6 +34,7 @@ const DEFAULT_DISCOVERY_ENDPOINT: &str = "https://api.jcode.sh/v1/discovery";
 static TELEMETRY_PERMANENTLY_REJECTED: AtomicBool = AtomicBool::new(false);
 static TELEMETRY_QUEUE_OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
 static TELEMETRY_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
+static TRANSCRIPT_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
 static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 #[cfg(test)]
 static TEST_EMITTED_PAYLOADS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
@@ -98,6 +100,8 @@ pub struct TodoTelemetryUpdate {
     pub completion_confidence: TelemetryScoreSummary,
     pub understands_user_intent: TelemetryScoreSummary,
     pub closed_feedback_loop: TelemetryScoreSummary,
+    pub feedback_loop_relevance: TelemetryScoreSummary,
+    pub feedback_loop_coverage: TelemetryScoreSummary,
     pub end_to_end_ownership: TelemetryScoreSummary,
 }
 
@@ -115,6 +119,8 @@ struct TodoSessionTelemetry {
     completion_confidence: TelemetryScoreSummary,
     understands_user_intent: TelemetryScoreSummary,
     closed_feedback_loop: TelemetryScoreSummary,
+    feedback_loop_relevance: TelemetryScoreSummary,
+    feedback_loop_coverage: TelemetryScoreSummary,
     end_to_end_ownership: TelemetryScoreSummary,
 }
 
@@ -133,6 +139,8 @@ impl TodoSessionTelemetry {
         self.completion_confidence = update.completion_confidence;
         self.understands_user_intent = update.understands_user_intent;
         self.closed_feedback_loop = update.closed_feedback_loop;
+        self.feedback_loop_relevance = update.feedback_loop_relevance;
+        self.feedback_loop_coverage = update.feedback_loop_coverage;
         self.end_to_end_ownership = update.end_to_end_ownership;
     }
 
@@ -401,16 +409,62 @@ enum DeliveryMode {
     Blocking(Duration),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryOptOutSource {
+    Environment,
+    MarkerFile,
+}
+
+impl TelemetryOptOutSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::MarkerFile => "marker_file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryStatus {
+    pub enabled: bool,
+    pub content_sharing_enabled: bool,
+    pub opt_out_source: Option<TelemetryOptOutSource>,
+    pub telemetry_id: Option<String>,
+}
+
+pub fn opt_out_source() -> Option<TelemetryOptOutSource> {
+    if opt_out_forced_by_env() {
+        return Some(TelemetryOptOutSource::Environment);
+    }
+    opt_out_marker_path()
+        .is_some_and(|path| path.exists())
+        .then_some(TelemetryOptOutSource::MarkerFile)
+}
+
+/// Return the current telemetry state without creating a telemetry identity or
+/// changing any persisted state.
+pub fn status() -> TelemetryStatus {
+    let opt_out_source = opt_out_source();
+    TelemetryStatus {
+        enabled: opt_out_source.is_none(),
+        content_sharing_enabled: content_sharing_enabled(),
+        opt_out_source,
+        telemetry_id: read_existing_id(),
+    }
+}
+
 pub fn is_enabled() -> bool {
-    if std::env::var("JCODE_NO_TELEMETRY").is_ok() || std::env::var("DO_NOT_TRACK").is_ok() {
-        logging::debug("telemetry disabled by environment");
-        return false;
+    match opt_out_source() {
+        Some(TelemetryOptOutSource::Environment) => {
+            logging::debug("telemetry disabled by environment");
+            false
+        }
+        Some(TelemetryOptOutSource::MarkerFile) => {
+            logging::debug("telemetry disabled by no_telemetry marker");
+            false
+        }
+        None => true,
     }
-    if opt_out_marker_path().map(|p| p.exists()).unwrap_or(false) {
-        logging::debug("telemetry disabled by no_telemetry marker");
-        return false;
-    }
-    true
 }
 
 /// Marker file recording that the user opted out of anonymous usage telemetry.
@@ -469,7 +523,9 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
 fn share_content_marker_path() -> Option<std::path::PathBuf> {
     storage::jcode_dir()
         .ok()
-        .map(|d| d.join("telemetry_share_content"))
+        // Version the marker so introducing actual uploads cannot silently turn
+        // an older, pre-upload UI choice into consent for the new program.
+        .map(|d| d.join("telemetry_share_transcripts_v1"))
 }
 
 /// Whether the user has opted in to sharing prompt/transcript content.
@@ -516,6 +572,50 @@ pub fn set_content_sharing_enabled(enabled: bool) -> bool {
             }
         }
     }
+}
+
+/// Queue one complete conversation transcript for the separately consented
+/// content-sharing program. This path is intentionally distinct from anonymous
+/// usage telemetry: it has its own endpoint, queue, backend storage, and an
+/// explicit opt-in gate that is off by default.
+pub fn record_transcript(
+    provider: &str,
+    model: &str,
+    end_reason: SessionEndReason,
+    messages: Value,
+) -> bool {
+    if !content_sharing_enabled() {
+        return false;
+    }
+    let Some(id) = get_or_create_id() else {
+        return false;
+    };
+    let message_count = messages.as_array().map_or(0, Vec::len);
+    if message_count == 0 {
+        return false;
+    }
+    let (schema_version, build_channel, is_git_checkout, is_ci, ran_from_cargo) =
+        telemetry_envelope();
+    let payload = serde_json::json!({
+        "id": id,
+        "event": "transcript",
+        "upload_id": uuid::Uuid::new_v4().to_string(),
+        "consent_version": 1,
+        "schema_version": schema_version,
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "build_channel": build_channel,
+        "is_git_checkout": is_git_checkout,
+        "is_ci": is_ci,
+        "ran_from_cargo": ran_from_cargo,
+        "provider": sanitize_telemetry_label(provider),
+        "model": sanitize_telemetry_label(model),
+        "end_reason": end_reason.as_str(),
+        "message_count": message_count,
+        "messages": messages,
+    });
+    send_transcript_payload(payload)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1189,6 +1289,34 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     }
 }
 
+fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
+    let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
+            .build()
+            .expect("telemetry HTTP client should build")
+    });
+    match client
+        .post(TRANSCRIPT_ENDPOINT)
+        .timeout(timeout)
+        .json(&payload)
+        .send()
+    {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            logging::warn(&format!(
+                "transcript endpoint rejected upload with HTTP {}",
+                response.status()
+            ));
+            false
+        }
+        Err(err) => {
+            logging::warn(&format!("transcript upload failed: {err}"));
+            false
+        }
+    }
+}
+
 fn telemetry_status_is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && !matches!(status, 408 | 425 | 429)
 }
@@ -1215,6 +1343,37 @@ fn background_sender() -> &'static SyncSender<Value> {
         })
         .expect("telemetry background worker should start")
     })
+}
+
+fn transcript_background_sender() -> &'static SyncSender<Value> {
+    TRANSCRIPT_BACKGROUND_SENDER.get_or_init(|| {
+        spawn_background_worker(64, |payload| {
+            let _ = post_transcript_payload(payload, ASYNC_SEND_TIMEOUT);
+        })
+        .expect("transcript telemetry background worker should start")
+    })
+}
+
+fn send_transcript_payload(payload: Value) -> bool {
+    #[cfg(test)]
+    {
+        if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
+            emitted.push(payload);
+        }
+        return true;
+    }
+    #[cfg(not(test))]
+    match transcript_background_sender().try_send(payload) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            logging::warn("transcript upload queue is full; dropping transcript");
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            logging::warn("transcript upload worker stopped; dropping transcript");
+            false
+        }
+    }
 }
 
 fn send_payload(payload: serde_json::Value, mode: DeliveryMode) -> bool {
@@ -2164,6 +2323,12 @@ pub enum TodoGateKind {
     Ownership,
     /// Closed feedback loop was too low; the goal needs a measurable objective.
     ClosedFeedbackLoop,
+    /// Completion checks were too indirect to represent acceptance behavior.
+    FeedbackLoopRelevance,
+    /// Completion checks did not cover enough success and failure paths.
+    FeedbackLoopCoverage,
+    /// Requirements or changed outputs were not mapped to observed checks.
+    FeedbackLoopTraceability,
     /// Plan-level alignment with the user's intention was too low.
     Alignment,
     /// Plan-level understanding of the user's intent was too low.
@@ -2182,7 +2347,10 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         observe_session_concurrency(state);
         let counter = match kind {
             TodoGateKind::Ownership => &mut state.todo_gate_ownership_count,
-            TodoGateKind::ClosedFeedbackLoop => &mut state.todo_gate_feedback_loop_count,
+            TodoGateKind::ClosedFeedbackLoop
+            | TodoGateKind::FeedbackLoopRelevance
+            | TodoGateKind::FeedbackLoopCoverage
+            | TodoGateKind::FeedbackLoopTraceability => &mut state.todo_gate_feedback_loop_count,
             TodoGateKind::Alignment => &mut state.todo_gate_alignment_count,
             TodoGateKind::IntentUnderstanding => &mut state.todo_gate_intent_count,
             TodoGateKind::Completion => &mut state.todo_gate_completion_count,
@@ -2192,7 +2360,10 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         if let Some(turn) = state.current_turn.as_mut() {
             let counter = match kind {
                 TodoGateKind::Ownership => &mut turn.todo_gate_ownership_count,
-                TodoGateKind::ClosedFeedbackLoop => &mut turn.todo_gate_feedback_loop_count,
+                TodoGateKind::ClosedFeedbackLoop
+                | TodoGateKind::FeedbackLoopRelevance
+                | TodoGateKind::FeedbackLoopCoverage
+                | TodoGateKind::FeedbackLoopTraceability => &mut turn.todo_gate_feedback_loop_count,
                 TodoGateKind::Alignment => &mut turn.todo_gate_alignment_count,
                 TodoGateKind::IntentUnderstanding => &mut turn.todo_gate_intent_count,
                 TodoGateKind::Completion => &mut turn.todo_gate_completion_count,

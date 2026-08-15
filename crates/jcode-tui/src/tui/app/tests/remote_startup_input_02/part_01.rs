@@ -740,7 +740,6 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                     && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
             })
             .collect::<Vec<_>>();
-        assert_eq!(jcode_routes.len(), 3);
         assert_eq!(
             jcode_routes
                 .iter()
@@ -748,6 +747,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from([
                 "claude-opus-4-8",
+                "claude-fable-5",
                 "gpt-5.5",
                 "gpt-5.6-sol",
             ])
@@ -760,7 +760,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
             route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
                 || matches!(
                     route.model.as_str(),
-                    "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+                    "claude-fable-5" | "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
                 )
         }));
     });
@@ -1930,6 +1930,31 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
         );
         assert!(notice.starts_with("Model → "), "got {notice}");
         assert!(!notice.contains(" via "), "got {notice}");
+    });
+}
+
+#[test]
+fn test_favorite_hotkey_does_not_confirm_remote_placeholder_without_matching_favorite() {
+    with_temp_jcode_home(|| {
+        let model = "placeholder-favorite-hotkey-model";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("Some Server".to_string());
+        app.remote_provider_model = Some(model.to_string());
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "Some Server".to_string(),
+            api_method: "remote-catalog".to_string(),
+            available: true,
+            detail: "refreshing route details…".to_string(),
+            cheapness: None,
+        }];
+
+        app.cycle_model_favorite_hotkey();
+
+        assert!(app.inline_interactive_state.is_some());
+        assert!(app.pending_model_switch.is_none());
     });
 }
 

@@ -112,6 +112,7 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.auto_poke_default_on = false;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
     app.todo_gate_digest_delivered = false;
     cleared
 }
@@ -243,6 +244,7 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.auto_poke_default_on = true;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is
     // eligible to be delivered again for the upcoming work.
     app.todo_gate_digest_delivered = false;
@@ -834,6 +836,7 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    let pending_retry = app.rate_limit_reset.is_some() && app.rate_limit_pending_message.is_some();
     if app.is_processing {
         app.cancel_requested = true;
         app.interleave_message = None;
@@ -845,6 +848,13 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         } else {
             app.set_status_notice("Interrupting...");
         }
+    } else if pending_retry {
+        app.clear_pending_remote_retry();
+        if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+            app.status = ProcessingStatus::Idle;
+            app.status_detail = None;
+        }
+        app.set_status_notice("Pending retry cancelled");
     } else {
         app.push_display_message(DisplayMessage::system(
             "Nothing to cancel: no prompt or operation is in progress.".to_string(),
@@ -3016,19 +3026,23 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         return true;
     };
     let extra: Vec<&str> = parts.collect();
-    match std::process::Command::new(bin)
-        .args(&extra)
-        .arg(&path)
-        .spawn()
-    {
-        Ok(_) => {
+    let mut command = std::process::Command::new(bin);
+    command.args(&extra).arg(&path);
+    match run_interactive_editor(&mut command) {
+        Ok(status) if status.success() => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Opening the active swarm routing prompt in {}:\n{}\n\nChanges apply after restarting or reloading Jcode because running agent tool registries cache the prompt.",
+                "Edited the active swarm routing prompt in {}:\n{}\n\nNew agents will use this prompt immediately. Existing agents retain their current prompt to preserve their context cache.",
                 editor,
                 path.display()
             )));
-            app.set_status_notice("Opened swarm prompt");
+            app.set_status_notice("Edited swarm prompt");
         }
+        Ok(status) => app.push_display_message(DisplayMessage::error(format!(
+            "Editor '{}' exited with status {} while editing {}",
+            editor,
+            status,
+            path.display()
+        ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
             "Failed to launch editor '{}' for {}: {}",
             editor,
@@ -3037,6 +3051,121 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         ))),
     }
     true
+}
+
+/// Run a terminal editor without letting it fight Jcode's raw-mode event loop.
+///
+/// Interactive editors need the primary screen and cooked input. Spawning one
+/// while the TUI keeps ownership of the terminal causes arrow-key escape
+/// sequences and editor output to be consumed/rendered by both processes.
+fn run_interactive_editor(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    run_interactive_editor_with(
+        command,
+        suspend_terminal_for_editor,
+        resume_terminal_after_editor,
+    )
+}
+
+fn run_interactive_editor_with(
+    command: &mut std::process::Command,
+    suspend: impl FnOnce(),
+    resume: impl FnOnce(),
+) -> std::io::Result<std::process::ExitStatus> {
+    suspend();
+    let result = command.status();
+    resume();
+    result
+}
+
+fn suspend_terminal_for_editor() {
+    use crossterm::event::{DisableBracketedPaste, DisableFocusChange, DisableMouseCapture};
+
+    // These commands are safe even when a mode was not enabled. Disable them
+    // before leaving the alternate screen so the child receives normal input.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableFocusChange,
+        DisableMouseCapture
+    );
+    crate::tui::disable_keyboard_enhancement();
+    jcode_tui_style::restore_terminal_quietly();
+}
+
+fn resume_terminal_after_editor() {
+    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
+
+    // Re-enter the TUI before returning to the event loop. The existing
+    // ratatui Terminal remains usable and the next loop iteration redraws it.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
+    let policy = crate::perf::tui_policy();
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    if policy.enable_focus_change {
+        let _ = crossterm::execute!(std::io::stdout(), EnableFocusChange);
+    }
+    if policy.enable_mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    }
+    if policy.enable_keyboard_enhancement {
+        crate::tui::enable_keyboard_enhancement();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod interactive_editor_tests {
+    use super::run_interactive_editor_with;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn handoff_waits_for_editor_before_resuming_terminal() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let child_events = Rc::clone(&events);
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 0.05"]);
+
+        let started = std::time::Instant::now();
+        let status = run_interactive_editor_with(
+            &mut command,
+            {
+                let events = Rc::clone(&events);
+                move || events.borrow_mut().push("suspend")
+            },
+            move || {
+                assert!(
+                    started.elapsed() >= std::time::Duration::from_millis(40),
+                    "terminal resumed before the editor process exited"
+                );
+                child_events.borrow_mut().push("resume");
+            },
+        )
+        .expect("editor command should run");
+
+        assert!(status.success());
+        assert_eq!(&*events.borrow(), &["suspend", "resume"]);
+    }
+
+    #[test]
+    fn handoff_resumes_terminal_after_editor_failure_status() {
+        let resumed = Rc::new(RefCell::new(false));
+        let resumed_after = Rc::clone(&resumed);
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 7"]);
+
+        let status = run_interactive_editor_with(
+            &mut command,
+            || {},
+            move || {
+                *resumed_after.borrow_mut() = true;
+            },
+        )
+        .expect("shell should launch");
+
+        assert_eq!(status.code(), Some(7));
+        assert!(*resumed.borrow());
+    }
 }
 
 pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
@@ -3390,19 +3519,6 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             }
 
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-            app.push_display_message(DisplayMessage {
-                role: "system".to_string(),
-                content: format!(
-                    "Opening config in editor...\n{} {}\n\n*Restart jcode after editing for changes to take effect.*",
-                    editor,
-                    path.display()
-                ),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
-
             // $EDITOR may contain arguments (e.g. "zed --wait" or "code -w"), so
             // split on whitespace and use the first token as the binary, passing
             // the rest as leading args before the file path. Report spawn errors
@@ -3411,15 +3527,25 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             match parts.next() {
                 Some(bin) => {
                     let extra: Vec<&str> = parts.collect();
-                    if let Err(e) = std::process::Command::new(bin)
-                        .args(&extra)
-                        .arg(&path)
-                        .spawn()
-                    {
-                        app.push_display_message(DisplayMessage::error(format!(
+                    let mut command = std::process::Command::new(bin);
+                    command.args(&extra).arg(&path);
+                    match run_interactive_editor(&mut command) {
+                        Ok(status) if status.success() => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Edited config in {}:\n{}\n\n*Restart jcode after editing for changes to take effect.*",
+                                editor,
+                                path.display()
+                            )));
+                            app.set_status_notice("Edited config");
+                        }
+                        Ok(status) => app.push_display_message(DisplayMessage::error(format!(
+                            "Editor '{}' exited with status {}",
+                            editor, status
+                        ))),
+                        Err(e) => app.push_display_message(DisplayMessage::error(format!(
                             "Failed to launch editor '{}': {}",
                             editor, e
-                        )));
+                        ))),
                     }
                 }
                 None => {

@@ -541,6 +541,10 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if handle_ctrl_kill_to_end(app, code, modifiers) {
+        return Ok(());
+    }
+
     if let Some(amount) = app.scroll_keys.scroll_amount(code, modifiers) {
         if amount < 0 {
             app.scroll_up((-amount) as usize);
@@ -761,10 +765,7 @@ async fn handle_remote_key_internal(
         }
     }
 
-    if code == KeyCode::Enter
-        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        && !app.input.trim().starts_with('/')
-    {
+    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
         if app.activate_picker_from_preview() {
             return Ok(());
         }
@@ -1655,6 +1656,9 @@ async fn handle_remote_key_internal(
                     // are both orphaned (same rationale as
                     // reset_current_session; side panel is #605).
                     crate::tui::mermaid::clear_active_diagrams();
+                    app.swarm_plan_items.clear();
+                    app.swarm_plan_version = None;
+                    app.swarm_plan_swarm_id = None;
                     super::super::commands_review::clear_side_panel_for_new_session(app);
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;

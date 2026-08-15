@@ -2172,6 +2172,57 @@ pub async fn run_usage_command(emit_json: bool) -> Result<()> {
     report_info::run_usage_command(emit_json).await
 }
 
+/// Explicitly pin the daemon's shared-server channel to an installed build.
+/// Promotion and reload intentionally remain separate operations: updates may
+/// advance a shared server that tracks stable, but must not overwrite a build
+/// the user deliberately promoted here.
+pub fn run_server_promote_command(version: Option<&str>, emit_json: bool) -> Result<()> {
+    #[derive(Serialize)]
+    struct ServerPromoteReport {
+        version: String,
+        previous: Option<String>,
+        binary: String,
+        promoted: bool,
+        detail: String,
+    }
+
+    let version = match version {
+        Some(version) => version.to_string(),
+        None => crate::build::read_current_version()?.ok_or_else(|| {
+            anyhow::anyhow!("No current version is installed; pass an installed VERSION explicitly")
+        })?,
+    };
+    let previous = crate::build::promote_version_to_shared_server(&version)?;
+    let binary = crate::build::version_binary_path(&version)?;
+    let promoted = previous.as_deref() != Some(version.as_str());
+    let detail = if promoted {
+        format!(
+            "shared-server channel {} -> {}. Run `jcode server reload` to apply it to the running daemon.",
+            previous.as_deref().unwrap_or("<unset>"),
+            version
+        )
+    } else {
+        format!(
+            "shared-server channel already points to {}. Run `jcode server reload` if the running daemon has not applied it.",
+            version
+        )
+    };
+    let report = ServerPromoteReport {
+        version,
+        previous,
+        binary: binary.display().to_string(),
+        promoted,
+        detail,
+    };
+
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", report.detail);
+    }
+    Ok(())
+}
+
 /// Gracefully reload the running background server onto the newest binary.
 ///
 /// This is the preferred upgrade path (issue #291): instead of killing the
@@ -2719,9 +2770,10 @@ fn take_run_gate_digest_if_turn_ended(
     already_delivered: bool,
     todos: &[crate::todo::TodoItem],
 ) -> Option<String> {
-    let work_remains = todos
-        .iter()
-        .any(|todo| todo.status != "completed" && todo.status != "cancelled");
+    let work_remains = todos.iter().any(|todo| {
+        !crate::todo::todo_status_is_completed(&todo.status)
+            && !crate::todo::todo_status_is_cancelled(&todo.status)
+    });
     if work_remains {
         return None;
     }
@@ -2735,7 +2787,10 @@ fn build_run_auto_poke_follow_up_from_todos(
 ) -> Option<RunAutoPokeFollowUp> {
     let incomplete: Vec<_> = todos
         .iter()
-        .filter(|todo| todo.status != "completed" && todo.status != "cancelled")
+        .filter(|todo| {
+            !crate::todo::todo_status_is_completed(&todo.status)
+                && !crate::todo::todo_status_is_cancelled(&todo.status)
+        })
         .cloned()
         .collect();
     if !incomplete.is_empty() {
@@ -2772,7 +2827,7 @@ fn build_run_todo_validation_message(
 ) -> Option<(String, bool)> {
     let completed: Vec<&crate::todo::TodoItem> = todos
         .iter()
-        .filter(|todo| todo.status == "completed")
+        .filter(|todo| crate::todo::todo_status_is_completed(&todo.status))
         .collect();
     if completed.is_empty() {
         return None;
@@ -2793,13 +2848,13 @@ fn build_run_todo_validation_message(
     if completion_confidence_needs_validation {
         crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
         Some((
-            crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE.to_string(),
+            crate::todo::build_todo_completion_continuation_message(todos),
             false,
         ))
     } else {
         crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::ConfidenceSpike);
         Some((
-            crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_string(),
+            crate::todo::build_todo_confidence_spike_continuation_message(todos),
             true,
         ))
     }

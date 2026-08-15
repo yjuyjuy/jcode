@@ -350,6 +350,38 @@ semantic_state! {
 }
 
 semantic_state! {
+    /// How directly a goal's feedback loop represents the behavior or outcome
+    /// the user will actually accept.
+    FeedbackLoopRelevance {
+        Indirect = "indirect", legacy: 0..=24, score: 12,
+        Synthetic = "synthetic", legacy: 25..=49, score: 37,
+        Representative = "representative", legacy: 50..=79, score: 75,
+        AcceptanceBlocked = "acceptance_blocked", legacy: 80..=95, score: 88,
+        AcceptanceAligned = "acceptance_aligned", legacy: 96..=100, score: 98,
+    }
+}
+
+semantic_state! {
+    /// How broadly a goal's feedback loop exercises the paths on which the
+    /// result can succeed or fail.
+    FeedbackLoopCoverage {
+        Narrow = "narrow", legacy: 0..=49, score: 25,
+        MainPaths = "main_paths", legacy: 50..=95, score: 75,
+        EdgeAndIntegrationPaths = "edge_and_integration_paths", legacy: 96..=100, score: 98,
+    }
+}
+
+semantic_state! {
+    /// How completely a goal's explicit requirements and changed public outputs
+    /// are connected to concrete checks and observed results.
+    FeedbackLoopTraceability {
+        Unmapped = "unmapped", legacy: 0..=49, score: 25,
+        Partial = "partial", legacy: 50..=95, score: 75,
+        Complete = "complete", legacy: 96..=100, score: 98,
+    }
+}
+
+semantic_state! {
     /// Evidence state behind a todo: from an unexamined guess to a result
     /// verified end to end.
     ConfidenceState {
@@ -516,6 +548,30 @@ pub struct TodoGoal {
     /// the outcome (e.g. a benchmark command and the metric it reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_loop: Option<String>,
+    /// How directly `feedback_loop` represents the public behavior and outcome
+    /// the user will actually judge, rather than a proxy or internal detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_loop_relevance: Option<FeedbackLoopRelevance>,
+    /// Every distinct `feedback_loop_relevance` state this goal has carried,
+    /// oldest first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback_loop_relevance_history: Vec<FeedbackLoopRelevance>,
+    /// How broadly `feedback_loop` exercises main paths, integration boundaries,
+    /// edge cases, packaging, and likely failure modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_loop_coverage: Option<FeedbackLoopCoverage>,
+    /// Every distinct `feedback_loop_coverage` state this goal has carried,
+    /// oldest first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback_loop_coverage_history: Vec<FeedbackLoopCoverage>,
+    /// Whether every explicit requirement and changed public output is mapped to
+    /// a concrete check and its observed result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_loop_traceability: Option<FeedbackLoopTraceability>,
+    /// Every distinct `feedback_loop_traceability` state this goal has carried,
+    /// oldest first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback_loop_traceability_history: Vec<FeedbackLoopTraceability>,
     /// How far the goal's result actually traveled toward the user's outcome:
     /// from a bare change through integration and workflow validation to a
     /// delivered outcome. Replaces the legacy 0-100 `end_to_end_ownership`
@@ -564,6 +620,9 @@ pub enum TodoGoalField {
     #[serde(alias = "hill_climbability")]
     ClosedFeedbackLoop,
     FeedbackLoop,
+    FeedbackLoopRelevance,
+    FeedbackLoopCoverage,
+    FeedbackLoopTraceability,
     #[serde(alias = "end_to_end_ownership")]
     DeliveryState,
     Autonomy,
@@ -620,6 +679,22 @@ mod semantic_state_tests {
         assert_eq!(
             serde_json::to_value(Difficulty::OpenEnded).unwrap(),
             "open_ended"
+        );
+        assert_eq!(
+            serde_json::to_value(FeedbackLoopRelevance::AcceptanceAligned).unwrap(),
+            "acceptance_aligned"
+        );
+        assert_eq!(
+            serde_json::to_value(FeedbackLoopRelevance::Synthetic).unwrap(),
+            "synthetic"
+        );
+        assert_eq!(
+            serde_json::to_value(FeedbackLoopRelevance::AcceptanceBlocked).unwrap(),
+            "acceptance_blocked"
+        );
+        assert_eq!(
+            serde_json::to_value(FeedbackLoopCoverage::EdgeAndIntegrationPaths).unwrap(),
+            "edge_and_integration_paths"
         );
         assert_eq!(
             serde_json::to_value(Autonomy::NecessaryFollowthrough).unwrap(),
@@ -680,6 +755,7 @@ mod semantic_state_tests {
         for score in 0..=100u8 {
             let _ = IntentUnderstanding::from_legacy_score(score);
             let _ = FeedbackLoopState::from_legacy_score(score);
+            let _ = FeedbackLoopRelevance::from_legacy_score(score);
             let _ = ConfidenceState::from_legacy_score(score);
             let _ = Difficulty::from_legacy_score(score);
             let _ = Autonomy::from_legacy_score(score);
@@ -687,6 +763,12 @@ mod semantic_state_tests {
         }
         assert!(ConfidenceState::Speculative < ConfidenceState::Verified);
         assert!(DeliveryState::ChangeMade < DeliveryState::WorkflowValidated);
+        assert!(FeedbackLoopRelevance::Indirect < FeedbackLoopRelevance::Synthetic);
+        assert!(FeedbackLoopRelevance::Synthetic < FeedbackLoopRelevance::Representative);
+        assert!(FeedbackLoopRelevance::Representative < FeedbackLoopRelevance::AcceptanceBlocked);
+        assert!(
+            FeedbackLoopRelevance::AcceptanceBlocked < FeedbackLoopRelevance::AcceptanceAligned
+        );
         // Representative scores map back onto their own state.
         for state in [
             ConfidenceState::Speculative,
@@ -743,6 +825,10 @@ mod semantic_state_tests {
         );
         assert_eq!(goal.difficulty, None);
         assert_eq!(goal.autonomy, None);
+        assert_eq!(goal.feedback_loop_relevance, None);
+        assert!(goal.feedback_loop_relevance_history.is_empty());
+        assert_eq!(goal.feedback_loop_coverage, None);
+        assert!(goal.feedback_loop_coverage_history.is_empty());
     }
 
     #[test]

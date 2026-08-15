@@ -86,7 +86,19 @@ fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
 }
 
 fn is_visible_conversation_message(message: &StoredMessage) -> bool {
-    message.display_role.is_none() && !is_internal_system_reminder_message(message)
+    message.display_role.is_none()
+        && !is_internal_system_reminder_message(message)
+        && !is_scheduled_task_message(message)
+}
+
+/// Recognize scheduler prompts persisted before they received an explicit
+/// system display role. This keeps old sessions from treating them as user
+/// prompts after resume.
+pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
+    message.role == Role::User
+        && message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text, .. } if text.trim_start().starts_with("[Scheduled task]\n"))
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1554,12 +1566,32 @@ fn redact_json_value(value: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Object(map) => {
-            for entry in map.values_mut() {
-                redact_json_value(entry);
+            for (key, entry) in map.iter_mut() {
+                if is_sensitive_json_key(key) {
+                    *entry = serde_json::Value::String("[REDACTED_SECRET]".to_string());
+                } else {
+                    redact_json_value(entry);
+                }
             }
         }
         _ => {}
     }
+}
+
+fn is_sensitive_json_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    normalized.contains("apikey")
+        || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || normalized.contains("password")
+        || matches!(
+            normalized.as_str(),
+            "authorization" | "cookie" | "setcookie" | "privatekey" | "clientsecret"
+        )
 }
 
 #[derive(Debug, Deserialize)]

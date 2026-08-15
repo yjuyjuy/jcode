@@ -552,21 +552,31 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
     ) -> Result<u64> {
-        self.send_message_with_images_reminder_and_nonce(content, images, system_reminder, None)
-            .await
+        self.send_message_with_images_reminder_skill_and_nonce(
+            content,
+            images,
+            system_reminder,
+            None,
+            None,
+        )
+        .await
     }
 
-    /// Send a user message carrying an optional stable idempotency key.
+    /// Send a user message carrying an optional active skill and an optional
+    /// stable idempotency key.
     ///
-    /// The `submission_nonce` is generated once per logical submission and
-    /// preserved across every busy/disconnect re-send of that submission so the
-    /// server can deduplicate a re-appended user turn (the duplicate-message
-    /// injection bug). Older servers ignore the field.
-    pub async fn send_message_with_images_reminder_and_nonce(
+    /// `active_skill` is the skill the client selected for this and subsequent
+    /// turns; the daemon resolves it against its own skill registry. The
+    /// `submission_nonce` is generated once per logical submission and preserved
+    /// across every busy/disconnect re-send of that submission so the server can
+    /// deduplicate a re-appended user turn (the duplicate-message injection bug).
+    /// Older servers ignore either field.
+    pub async fn send_message_with_images_reminder_skill_and_nonce(
         &mut self,
         content: String,
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
+        active_skill: Option<String>,
         submission_nonce: Option<String>,
     ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
@@ -579,6 +589,7 @@ impl RemoteConnection {
             content,
             images,
             system_reminder,
+            active_skill,
             no_reply: false,
             submission_nonce,
         };
@@ -646,7 +657,17 @@ impl RemoteConnection {
             allow_session_takeover: false,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request(request).await?;
+        // An explicit picker/workspace switch must accept the target's History
+        // even when a SessionId event (or reload-time local restore) associated
+        // this connection with the target before History arrived. Otherwise
+        // `has_loaded_history` still describes the source session and the TUI
+        // drops the target replay as a duplicate, leaving an orphan resume with
+        // an empty transcript despite its intact persisted messages (#753).
+        // History application replaces the display vector, so repeated payloads
+        // remain idempotent rather than appending duplicate messages.
+        self.has_loaded_history = false;
+        Ok(())
     }
 
     /// Request a wider compacted-history window for the active session.
@@ -1462,6 +1483,38 @@ mod tests {
             elapsed
         );
         assert_eq!(remote.next_request_id, 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_rearms_history_replay_without_appending_locally() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        remote.mark_history_loaded();
+
+        remote
+            .resume_session("session_orphaned_after_reload")
+            .await
+            .expect("resume request should send");
+
+        assert!(
+            !remote.has_loaded_history(),
+            "target persisted History must not be mistaken for the source session's replay"
+        );
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("resume request should be readable by peer");
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).expect("resume request should deserialize"),
+            Request::ResumeSession { session_id, .. }
+                if session_id == "session_orphaned_after_reload"
+        ));
     }
 
     #[tokio::test]

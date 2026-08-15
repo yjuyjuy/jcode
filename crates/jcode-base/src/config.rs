@@ -51,6 +51,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_AUTOREVIEW_MODEL",
     "JCODE_AUTO_POKE",
     "JCODE_AUTO_SERVER_RELOAD",
+    "JCODE_CHECK_UPDATES",
     "JCODE_BING_API_KEY",
     "JCODE_BING_API_KEY_ENV",
     "JCODE_BING_MARKET",
@@ -163,6 +164,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SMTP_PASSWORD",
     "JCODE_SPAWN_HOOK",
     "JCODE_STREAM_IDLE_TIMEOUT_SECS",
+    "JCODE_MAX_RETRIES",
+    "JCODE_RETRY_BACKOFF_CAP_SECS",
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_MODEL",
     "JCODE_SWARM_MAX_CONCURRENT_AGENTS",
@@ -643,6 +646,7 @@ impl ToolConfig {
                     "agentgrep",
                     "ls",
                     "batch",
+                    "mcp",
                 ]
                 .into_iter()
                 .map(|name| name.to_string())
@@ -720,6 +724,7 @@ impl Default for DictationConfig {
     }
 }
 
+pub mod change_report;
 mod config_file;
 mod default_file;
 mod display_summary;

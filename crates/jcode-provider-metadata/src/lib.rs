@@ -34,6 +34,7 @@ pub enum LoginProviderTarget {
     Azure,
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
+    GrokBuild,
     Copilot,
     Gemini,
     Antigravity,
@@ -53,6 +54,7 @@ pub enum LoginProviderAuthStateKey {
     Gemini,
     Antigravity,
     Cursor,
+    GrokBuild,
     Google,
 }
 
@@ -328,6 +330,19 @@ mod tests {
                 Some(profile.api_base)
             );
         }
+    }
+
+    #[test]
+    fn zai_login_identifies_coding_plan_subscription_key() {
+        let provider = resolve_login_provider("zai").expect("Z.AI provider");
+        assert_eq!(provider.auth_kind, LoginProviderAuthKind::ApiKey);
+        assert_eq!(provider.menu_detail, "Coding Plan subscription API key");
+
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Z.AI must use its OpenAI-compatible Coding Plan endpoint");
+        };
+        assert_eq!(profile.api_base, "https://api.z.ai/api/coding/paas/v4");
+        assert_eq!(profile.setup_url, "https://docs.z.ai/devpack/quick-start");
     }
 
     #[test]

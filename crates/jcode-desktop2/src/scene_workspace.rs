@@ -7,7 +7,7 @@
 //! [`crate::workspace`], each clipped to a rounded window with its own border
 //! ring, so where one session ends and the next begins is legible at a glance.
 
-use crate::{Model, paint, scene, strip, workspace};
+use crate::{Model, paint, scene, scene_file_tree, strip, workspace};
 use vello::Scene;
 use vello::kurbo::{Affine, Rect, RoundedRect, Stroke};
 
@@ -33,11 +33,12 @@ pub fn build_workspace_scene(
 ) {
     if model.overview.is_visible() {
         scene::build_scene(output, painter, model, size, scale);
+        scene_file_tree::draw(output, painter, model, size, scale);
         return;
     }
-    let entries = model.strip.entries();
+    let entries = model.strips.panels();
     let columns = workspace::placement(
-        &model.strip,
+        &model.strips,
         &model.workspace,
         model.session_id.as_deref(),
         (f64::from(size.0), f64::from(size.1)),
@@ -48,6 +49,7 @@ pub fn build_workspace_scene(
     // painting.
     if columns.len() <= 1 && !model.workspace.is_animating() {
         scene::build_scene(output, painter, model, size, scale);
+        scene_file_tree::draw(output, painter, model, size, scale);
         return;
     }
 
@@ -126,17 +128,18 @@ pub fn build_workspace_scene(
             &page,
         );
     }
+    scene_file_tree::draw(output, painter, model, size, scale);
 }
 
 /// Make the immutable scene input for one retained session. This deliberately
 /// does not clone the live model wholesale: doing so would copy every cached
 /// Peek transcript on every frame and would leak the focused page's draft,
 /// selection, overlays, and animation state into its neighbors.
-fn retained_session_model(source: &Model, entry: &strip::Entry) -> Model {
+fn retained_session_model(source: &Model, entry: &strip::Panel) -> Model {
     let cached = source.peeks.get(&entry.session_id);
     let loading = cached.is_none();
     let transcript = cached.cloned().unwrap_or_default();
-    let mut session_strip = source.strip.clone();
+    let mut session_strip = source.strips.clone();
     session_strip.focus_session(&entry.session_id);
 
     Model {
@@ -163,12 +166,14 @@ fn retained_session_model(source: &Model, entry: &strip::Entry) -> Model {
         hint: source.hint,
         stream: crate::stream::Stream::default(),
         smooth: crate::scroll::Smooth::default(),
-        strip: session_strip,
+        strips: session_strip,
         workspace: workspace::Workspace::default(),
         overview: crate::overview::Overview::default(),
         peeks: crate::overview::Peeks::default(),
         resume: crate::resume::Picker::default(),
+        help_open: false,
         working_dir: entry.working_dir.clone(),
+        file_tree: crate::file_tree::FileTree::default(),
         model: None,
         model_picker: crate::model_picker::Picker::default(),
         boot: crate::boot::Boot::default(),
@@ -195,9 +200,9 @@ mod tests {
     #[test]
     fn retained_page_uses_the_complete_cached_transcript() {
         let mut source = Model::default();
-        let entry = strip::Entry::new("neighbor", Some("/work/neighbor"));
-        source.strip = strip::Strip::build(
-            vec![strip::Entry::new("live", Some("/work/live")), entry.clone()],
+        let entry = strip::Panel::new("neighbor", Some("/work/neighbor"));
+        source.strips = strip::Strips::build(
+            vec![strip::Panel::new("live", Some("/work/live")), entry.clone()],
             Some("live"),
         );
         let transcript = transcript([
@@ -211,14 +216,14 @@ mod tests {
         assert_eq!(retained.transcript, transcript);
         assert_eq!(retained.session_id.as_deref(), Some("neighbor"));
         assert_eq!(retained.working_dir.as_deref(), Some("/work/neighbor"));
-        assert_eq!(retained.strip.focused_session(), Some("neighbor"));
-        assert_eq!(source.strip.focused_session(), Some("live"));
+        assert_eq!(retained.strips.focused_session(), Some("neighbor"));
+        assert_eq!(source.strips.focused_session(), Some("live"));
     }
 
     #[test]
     fn retained_page_is_a_read_only_settled_shell() {
         let mut source = Model::default();
-        let entry = strip::Entry::new("neighbor", None);
+        let entry = strip::Panel::new("neighbor", None);
         source.editor.insert_str("unsent live draft");
         source.focused = true;
         source.busy = true;
@@ -246,7 +251,7 @@ mod tests {
     #[test]
     fn missing_peek_still_gets_the_full_loading_shell() {
         let source = Model::default();
-        let retained = retained_session_model(&source, &strip::Entry::new("pending", None));
+        let retained = retained_session_model(&source, &strip::Panel::new("pending", None));
 
         assert!(retained.transcript.is_empty());
         assert_eq!(retained.notice.as_deref(), Some("loading session…"));
@@ -256,11 +261,11 @@ mod tests {
     #[test]
     fn retained_page_builds_with_the_actual_session_scene() {
         let mut source = Model::default();
-        let entry = strip::Entry::new("neighbor", Some("/work/neighbor"));
+        let entry = strip::Panel::new("neighbor", Some("/work/neighbor"));
         source.session_id = Some("live".into());
-        source.strip = strip::Strip::build(
+        source.strips = strip::Strips::build(
             vec![
-                strip::Entry::new("live", Some("/work/neighbor")),
+                strip::Panel::new("live", Some("/work/neighbor")),
                 entry.clone(),
             ],
             Some("live"),
@@ -287,11 +292,11 @@ mod tests {
     fn a_row_slide_builds_with_both_rows() {
         let mut source = Model::default();
         source.session_id = Some("b1".into());
-        source.strip = strip::Strip::build(
+        source.strips = strip::Strips::build(
             vec![
-                strip::Entry::new("a1", Some("/w/jcode")),
-                strip::Entry::new("a2", Some("/w/jcode")),
-                strip::Entry::new("b1", Some("/w/site")),
+                strip::Panel::new("a1", Some("/w/jcode")),
+                strip::Panel::new("a2", Some("/w/jcode")),
+                strip::Panel::new("b1", Some("/w/site")),
             ],
             Some("b1"),
         );
