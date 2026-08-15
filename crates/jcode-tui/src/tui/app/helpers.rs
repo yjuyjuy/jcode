@@ -247,6 +247,7 @@ pub(super) fn debug_response_path() -> PathBuf {
 
 #[path = "helpers_rate_limit_parse.rs"]
 mod rate_limit_parse;
+pub(super) use rate_limit_parse::error_looks_like_rate_limit;
 pub(super) use rate_limit_parse::parse_rate_limit_error;
 
 pub(super) fn is_context_limit_error(error: &str) -> bool {

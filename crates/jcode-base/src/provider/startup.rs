@@ -416,6 +416,7 @@ impl MultiProvider {
 
         result.spawn_anthropic_catalog_refresh_if_needed();
         result.spawn_openai_catalog_refresh_if_needed();
+        result.maybe_align_active_account_to_cswap();
         result.auto_select_active_multi_account();
         crate::logging::info(&format!(
             "[TIMING] provider_init: claude={}, anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
@@ -564,6 +565,62 @@ impl MultiProvider {
 
     pub fn auto_select_active_multi_account(&self) {
         self.auto_select_multi_account_for_provider(self.active_provider());
+    }
+
+    /// Align jcode's active Anthropic account to the one the external `cswap`
+    /// (claude-swap) manager currently has selected, joined by email.
+    ///
+    /// A respawned session otherwise defaults to jcode's last cached active
+    /// account, which may be a different (possibly rate-limited) account than
+    /// the one the operator switched cswap to, causing an immediate 429 on the
+    /// first turn. This runs once at startup, before
+    /// [`Self::auto_select_active_multi_account`], so the usage-driven selection
+    /// that follows starts from cswap's current choice.
+    ///
+    /// Entirely best-effort: gated by `provider.cswap_sync` (default on), a no-op
+    /// when cswap is absent or its active account has no matching jcode account,
+    /// and it only sets the in-process active-account override - it never
+    /// rewrites credentials or calls cswap to switch.
+    fn maybe_align_active_account_to_cswap(&self) {
+        if !crate::config::Config::load().provider.cswap_sync {
+            return;
+        }
+        // Only meaningful for a multi-account Anthropic setup.
+        let accounts = match crate::auth::claude::list_accounts() {
+            Ok(accounts) if accounts.len() > 1 => accounts,
+            _ => return,
+        };
+        let Some(cswap_email) = crate::auth::cswap::active_account_email() else {
+            return;
+        };
+        let cswap_email = cswap_email.trim().to_ascii_lowercase();
+        let Some(target) = accounts.iter().find(|account| {
+            account
+                .email
+                .as_deref()
+                .map(|email| email.trim().eq_ignore_ascii_case(&cswap_email))
+                .unwrap_or(false)
+        }) else {
+            crate::logging::info(&format!(
+                "cswap active account '{}' has no matching jcode account; leaving jcode's selection unchanged",
+                cswap_email
+            ));
+            return;
+        };
+
+        let current = crate::auth::claude::active_account_label();
+        if current.as_deref() == Some(target.label.as_str()) {
+            // Already aligned; nothing to do.
+            return;
+        }
+
+        crate::logging::info(&format!(
+            "Aligning active Anthropic account to cswap's current selection: {} -> {} ({})",
+            current.as_deref().unwrap_or("<none>"),
+            target.label,
+            cswap_email
+        ));
+        crate::auth::claude::set_active_account_override(Some(target.label.clone()));
     }
 
     /// Poll-driven account re-evaluation, safe to call at every turn boundary.

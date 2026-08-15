@@ -1,8 +1,8 @@
 {
-  "total": 3298,
+  "total": 3301,
   "totals_by_pattern": {
-    "dot_ok": 1234,
-    "let_underscore": 1224,
+    "dot_ok": 1235,
+    "let_underscore": 1226,
     "unwrap_or_default": 840
   },
   "tracked_files": {
@@ -610,6 +610,11 @@
       "dot_ok": 5,
       "let_underscore": 1,
       "unwrap_or_default": 8
+    },
+    "crates/jcode-base/src/auth/cswap.rs": {
+      "dot_ok": 1,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/auth/cursor.rs": {
       "dot_ok": 10,
@@ -1423,7 +1428,7 @@
     },
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": {
       "dot_ok": 9,
-      "let_underscore": 15,
+      "let_underscore": 16,
       "unwrap_or_default": 1
     },
     "crates/jcode-provider-antigravity-runtime/src/lib.rs": {

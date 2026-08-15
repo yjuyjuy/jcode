@@ -32,6 +32,8 @@ mod stream_timeout;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
+pub use account_failover::anthropic_has_alternate_account_with_headroom;
+pub use account_failover::reactive_switch_on_rate_limit;
 use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
     same_provider_account_candidates, same_provider_account_failover_enabled,

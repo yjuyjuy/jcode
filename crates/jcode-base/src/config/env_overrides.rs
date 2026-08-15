@@ -780,6 +780,11 @@ impl Config {
                 self.provider.account_priority = order;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_CSWAP_SYNC") {
+            if let Some(enabled) = parse_env_bool(&v) {
+                self.provider.cswap_sync = enabled;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_STREAM_IDLE_TIMEOUT_SECS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 if parsed > 0 {

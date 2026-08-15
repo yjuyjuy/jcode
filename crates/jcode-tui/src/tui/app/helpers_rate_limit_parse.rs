@@ -3,6 +3,17 @@ use std::time::Duration;
 
 use super::parse_clock_time_to_duration;
 
+/// Whether an error string looks like an Anthropic rate limit / usage cap
+/// (HTTP 429), independent of whether a reset time can be parsed out of it.
+pub(crate) fn error_looks_like_rate_limit(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("hit your limit")
+}
+
 /// Parse rate limit reset time from error message
 /// Returns the Duration until rate limit resets, if this is a rate limit error
 pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
