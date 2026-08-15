@@ -17,6 +17,67 @@ struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
 
+#[derive(Clone)]
+struct ExplicitPinProvider {
+    model: Arc<std::sync::Mutex<String>>,
+    pin: Arc<std::sync::Mutex<Option<String>>>,
+    set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ExplicitPinProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Arc::new(std::sync::Mutex::new(model.to_string())),
+            pin: Arc::new(std::sync::Mutex::new(None)),
+            set_model_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ExplicitPinProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("ExplicitPinProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, request: &str) -> Result<()> {
+        self.set_model_requests
+            .lock()
+            .unwrap()
+            .push(request.to_string());
+        let spec = request.strip_prefix("openrouter:").unwrap_or(request);
+        let (model, pin) = spec
+            .rsplit_once('@')
+            .map(|(model, pin)| (model, Some(pin.to_string())))
+            .unwrap_or((spec, None));
+        *self.model.lock().unwrap() = model.to_string();
+        *self.pin.lock().unwrap() = pin;
+        Ok(())
+    }
+
+    fn explicit_provider_pin_for_current_model(&self) -> Option<String> {
+        self.pin.lock().unwrap().clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 fn content_text(content: &[ContentBlock]) -> &str {
     match content.first() {
         Some(ContentBlock::Text { text, .. }) => text,
@@ -710,6 +771,15 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     let tool_name = "gmail";
 
     assert!(
+        tool_names.iter().any(|name| name == "jcode_docs"),
+        "jcode_docs must be model-visible in regular sessions"
+    );
+    assert!(
+        !tool_names.iter().any(|name| name == "selfdev"),
+        "selfdev must not be model-visible in regular sessions"
+    );
+
+    assert!(
         definitions
             .iter()
             .any(|definition| definition.name == tool_name),
@@ -871,6 +941,38 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
+}
+
+#[tokio::test]
+async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+
+    agent
+        .set_model("z-ai/glm-5.2@Novita")
+        .expect("set explicitly pinned model");
+    assert_eq!(agent.provider_model(), "z-ai/glm-5.2@Novita");
+    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
+    assert_eq!(persisted.model.as_deref(), Some("z-ai/glm-5.2@Novita"));
+
+    let restored_provider = Arc::new(ExplicitPinProvider::new("other/model"));
+    let restored_provider_dyn: Arc<dyn Provider> = restored_provider.clone();
+    let restored_registry = Registry::new(restored_provider_dyn.clone()).await;
+    let restored_agent =
+        Agent::new_with_session(restored_provider_dyn, restored_registry, persisted, None);
+
+    assert_eq!(
+        restored_provider
+            .set_model_requests
+            .lock()
+            .unwrap()
+            .as_slice(),
+        ["openrouter:z-ai/glm-5.2@Novita"]
+    );
+    assert_eq!(restored_agent.provider_model(), "z-ai/glm-5.2@Novita");
 }
 
 #[tokio::test]
@@ -1381,7 +1483,7 @@ fn guardrail_stop_reason_detection() {
 }
 
 #[test]
-fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
+fn fable_guardrail_reconsideration_is_narrow_and_bounded() {
     assert!(Agent::should_reconsider_fable_guardrail(
         "claude-fable-5",
         Some("refusal"),
@@ -1394,11 +1496,23 @@ fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
         0,
         1,
     ));
-    assert!(!Agent::should_reconsider_fable_guardrail(
+    assert!(Agent::should_reconsider_fable_guardrail(
         "claude-fable-5",
         Some("refusal"),
         1,
-        1,
+        3,
+    ));
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        2,
+        3,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        3,
+        3,
     ));
     assert!(!Agent::should_reconsider_fable_guardrail(
         "claude-fable-5",
@@ -1412,6 +1526,17 @@ fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
         0,
         1,
     ));
+}
+
+#[test]
+fn fable_guardrail_prompt_suite_is_distinct_and_safety_preserving() {
+    let prompts = Agent::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS;
+    assert_eq!(prompts.len(), 3);
+    assert_ne!(prompts[0], prompts[1]);
+    assert_ne!(prompts[1], prompts[2]);
+    assert!(prompts[0].contains("full context"));
+    assert!(prompts[1].contains("safe portions"));
+    assert!(prompts[2].contains("Do not weaken a refusal"));
 }
 
 #[test]
@@ -1490,6 +1615,23 @@ async fn empty_post_tool_response_is_retried_in_shared_helper() {
         .expect("helper must not error");
     assert!(retried);
     assert_eq!(attempts, 1);
+    let recovery = agent
+        .session
+        .messages
+        .last()
+        .expect("recovery instruction must be persisted");
+    assert_eq!(recovery.role, Role::User);
+    assert!(
+        recovery
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .is_some_and(|text| text.starts_with("<system-reminder>")),
+        "synthetic recovery instruction must be hidden from the transcript"
+    );
 
     // A guardrail refusal is deliberate and must not be retried.
     let retried = agent
@@ -1621,7 +1763,7 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
 #[derive(Clone, Default)]
 struct FableGuardrailProvider {
     calls: Arc<std::sync::Mutex<usize>>,
-    reconsideration_seen: Arc<std::sync::Mutex<bool>>,
+    prompts_seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -1638,15 +1780,18 @@ impl Provider for FableGuardrailProvider {
             *calls += 1;
             *calls
         };
-        if call == 2 {
-            *self.reconsideration_seen.lock().unwrap() = messages.iter().any(|message| {
-                message_text(message).contains("genuinely requires a safety refusal")
-            });
+        if call > 1 {
+            let prompt = messages
+                .last()
+                .map(message_text)
+                .unwrap_or_default()
+                .to_string();
+            self.prompts_seen.lock().unwrap().push(prompt);
         }
 
         let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
         tokio::spawn(async move {
-            if call == 1 {
+            if call <= 3 {
                 let _ = tx
                     .send(Ok(StreamEvent::MessageEnd {
                         stop_reason: Some("refusal".to_string()),
@@ -1686,7 +1831,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     let _guard = crate::storage::lock_test_env();
     let fable = FableGuardrailProvider::default();
     let calls = fable.calls.clone();
-    let reconsideration_seen = fable.reconsideration_seen.clone();
+    let prompts_seen = fable.prompts_seen.clone();
     let provider: Arc<dyn Provider> = Arc::new(fable);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
@@ -1704,8 +1849,12 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         }
     }
 
-    assert_eq!(*calls.lock().unwrap(), 2);
-    assert!(*reconsideration_seen.lock().unwrap());
+    assert_eq!(*calls.lock().unwrap(), 4);
+    let prompts = prompts_seen.lock().unwrap();
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[0].contains("concrete harmful action"));
+    assert!(prompts[1].contains("safe portions"));
+    assert!(prompts[2].contains("final, independent policy check"));
     assert!(
         text.contains("Reconsidered and completed safely"),
         "{text:?}"

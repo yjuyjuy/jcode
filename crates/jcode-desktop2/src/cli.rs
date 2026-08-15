@@ -31,6 +31,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
             Some(Ok(()))
         }
         Some("--profile-states") => Some(run_profile_states(&args[1..])),
+        Some("--profile-transitions") => Some(profile_transitions()),
         Some("--bench-stream") => Some(bench_stream(&args[1..])),
         Some("--bench-scroll") => Some(bench_scroll()),
         Some("--profile-scroll") => Some(profile_scroll()),
@@ -38,6 +39,8 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--capture") => Some(run_capture(&args[1..])),
         Some("--check-clipboard-image") => Some(check_clipboard_image()),
         Some("--check-primary-selection") => Some(check_primary_selection()),
+        Some("--check-connect") => Some(check_connect()),
+        Some("--check-new-session") => Some(check_new_session()),
         Some("--check-reconnect") => Some(check_reconnect()),
         Some("--check-resume-scan") => Some(check_resume_scan()),
         Some("--e2e") => Some(run_e2e(
@@ -47,6 +50,113 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+/// Exercise the exact worker and command queue used by Ctrl+Shift+N.
+fn check_new_session() -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let (updates, outgoing) = harness::spawn(|| {});
+    let wait_for_attached = |after: Option<&str>| -> Result<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match updates.recv_timeout(Duration::from_millis(100)) {
+                Ok(harness::HarnessUpdate::Attached { session_id, .. })
+                    if after != Some(session_id.as_str()) =>
+                {
+                    return Ok(session_id);
+                }
+                Ok(harness::HarnessUpdate::Failed(message)) => anyhow::bail!(message),
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("desktop2 harness disconnected")
+                }
+            }
+        }
+        anyhow::bail!("desktop2 did not attach a session within 10 seconds")
+    };
+
+    let first = wait_for_attached(None)?;
+    println!("desktop2 initial session attached: {first}");
+    let started = Instant::now();
+    outgoing.send(harness::Command::New)?;
+    let second = wait_for_attached(Some(&first))?;
+    println!(
+        "desktop2 new session ok: {first} -> {second} in {:.2?}",
+        started.elapsed()
+    );
+    Ok(())
+}
+
+/// `--profile-transitions`: time the real daemon boundaries behind navigation.
+///
+/// Frame profiling cannot explain a slow new-session gesture: that path is an
+/// SDK round trip and agent construction, not scene building. Keep this as a
+/// small live probe so the two costs remain separately measurable. This creates
+/// one real session, which is retained like a session created by the window.
+fn profile_transitions() -> Result<()> {
+    use std::time::Instant;
+
+    let total = Instant::now();
+    let start = Instant::now();
+    jcode_sdk::ensure_runtime(&jcode_sdk::LaunchOptions::default(), &|_| {})?;
+    let runtime = start.elapsed();
+
+    let start = Instant::now();
+    let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+        client_name: concat!("jcode-desktop2-profile/", env!("CARGO_PKG_VERSION")).to_string(),
+        ensure_runtime: false,
+        ..Default::default()
+    })?;
+    let connect = start.elapsed();
+
+    // Match the window exactly: attachment emits model and status events in
+    // addition to its reply, so the event stream must be subscribed first.
+    let events = client.events(None);
+
+    let start = Instant::now();
+    let session = client.create_session(harness::default_working_dir())?;
+    let create = start.elapsed();
+
+    let start = Instant::now();
+    client.attach_session(&session.session_id)?;
+    let attach = start.elapsed();
+
+    drop(events);
+    println!("transition                  elapsed");
+    println!("-----------------------------------");
+    println!("runtime ready              {:>8.2?}", runtime);
+    println!("connect                    {:>8.2?}", connect);
+    println!("spawn new session          {:>8.2?}", create);
+    println!("attach session             {:>8.2?}", attach);
+    println!("-----------------------------------");
+    println!("total                      {:>8.2?}", total.elapsed());
+    println!("created session: {}", session.session_id);
+    Ok(())
+}
+
+/// `--check-connect`: exercise the exact startup boundary used by the window.
+///
+/// `--version` only proves that the GUI executable can start. Desktop2 also
+/// requires the harness API bridge beside that executable (or on PATH), and a
+/// build missing that companion used to pass activation before every new window
+/// sat on "Connecting". Keep this check small enough to run after every self-dev
+/// build: start/locate the runtime, complete the protocol handshake, then exit.
+fn check_connect() -> Result<()> {
+    jcode_sdk::ensure_runtime(&jcode_sdk::LaunchOptions::default(), &|status| {
+        println!("[connect] {status}")
+    })?;
+    let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+        client_name: concat!("jcode-desktop2-check/", env!("CARGO_PKG_VERSION")).to_string(),
+        ensure_runtime: false,
+        ..Default::default()
+    })?;
+    println!(
+        "desktop2 connection ok: {} at {}",
+        client.server,
+        harness::api_socket_path().display()
+    );
+    Ok(())
 }
 
 /// `--check-clipboard-image`: prove Ctrl+V's image path against the *real*
@@ -170,13 +280,13 @@ fn run_script(steps: &[String]) -> Result<()> {
         // nothing to lay out for a lone session and the interesting failures
         // are all about moving between them.
         if let Some(spec) = step.strip_prefix("sessions:") {
-            let entries: Vec<crate::strip::Entry> = spec
+            let entries: Vec<crate::strip::Panel> = spec
                 .split(',')
                 .filter(|part| !part.is_empty())
                 .enumerate()
                 .map(|(index, part)| {
                     let (id, project) = part.split_once('=').unwrap_or((part, "project"));
-                    crate::strip::Entry {
+                    crate::strip::Panel {
                         session_id: id.to_string(),
                         title: None,
                         working_dir: Some(format!("/w/{project}")),
@@ -187,7 +297,42 @@ fn run_script(steps: &[String]) -> Result<()> {
                 .collect();
             let first = entries.first().map(|entry| entry.session_id.clone());
             app.model.session_id = first.clone();
-            app.model.strip = crate::strip::Strip::build(entries, first.as_deref());
+            app.model.strips = crate::strip::Strips::build(entries, first.as_deref());
+            continue;
+        }
+        // `click-strip:<group>:<panel>` drives the same pointer handler as the
+        // live window, at the centre of the block produced by the real strip
+        // layout. This keeps mouse behavior available to packaged-binary smoke
+        // tests without depending on compositor-specific pointer injection.
+        if let Some(spec) = step.strip_prefix("click-strip:") {
+            let (group, panel) = spec
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("click-strip expects <group>:<panel>"))?;
+            let group: usize = group.parse()?;
+            let panel: usize = panel.parse()?;
+            app.frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+            let (top, bottom) = app
+                .frame
+                .strip()
+                .ok_or_else(|| anyhow::anyhow!("session strip is not visible"))?;
+            let point =
+                crate::strip::layout_items(&app.model.strips, app.frame.left, app.frame.right)
+                    .into_iter()
+                    .find_map(|item| match item {
+                        crate::strip::Item::Panel {
+                            strip,
+                            panel: index,
+                            x,
+                            width,
+                            ..
+                        } if strip == group && index == panel => {
+                            Some((x + width / 2.0, (top + bottom) / 2.0))
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("strip panel {group}:{panel} is not visible"))?;
+            app.pointer = point;
+            app.on_pointer_pressed();
             continue;
         }
         match step.as_str() {
@@ -311,6 +456,9 @@ fn run_e2e(message: &str) -> Result<()> {
             // reconnect until the deadline.
             harness::HarnessUpdate::Failed(message) => {
                 anyhow::bail!("harness failure: {message}");
+            }
+            harness::HarnessUpdate::ConnectionLost(message) => {
+                anyhow::bail!("harness connection lost: {message}");
             }
             harness::HarnessUpdate::Attached { session_id, .. } => {
                 println!("[e2e] attached: {session_id}");

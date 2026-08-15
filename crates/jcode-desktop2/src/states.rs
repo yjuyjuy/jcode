@@ -12,6 +12,9 @@ type NodeBuilder = fn() -> Model;
 /// All named state-space nodes. Keep deterministic: no clocks, no randomness.
 pub const NODES: &[(&str, NodeBuilder)] = &[
     ("connecting", connecting),
+    ("starting_new_session", starting_new_session),
+    ("attach_in_flight", attach_in_flight),
+    ("reconnecting", reconnecting),
     ("attached_empty", attached_empty),
     ("boot_opening", boot_opening),
     ("boot_donut", boot_donut),
@@ -65,6 +68,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("resume_picker_preview", resume_picker_preview),
     ("resume_picker_search", resume_picker_search),
     ("resume_picker_group", resume_picker_group),
+    ("help_overlay", help_overlay),
     ("settings_panel", settings_panel),
     ("settings_panel_hover", settings_panel_hover),
     ("model_picker", model_picker),
@@ -119,6 +123,7 @@ fn connecting() -> Model {
         transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
         resume: crate::resume::Picker::default(),
+        help_open: false,
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
@@ -142,7 +147,7 @@ fn connecting() -> Model {
         // Detached: nothing has told us the model yet, so the caption is absent.
         model: None,
         model_picker: crate::model_picker::Picker::default(),
-        strip: crate::strip::Strip::default(),
+        strips: crate::strip::Strips::default(),
         workspace: crate::workspace::Workspace::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
@@ -158,6 +163,7 @@ fn connecting() -> Model {
         smooth: crate::scroll::Smooth::default(),
         // Detached: no session, so no directory to name.
         working_dir: None,
+        file_tree: crate::file_tree::FileTree::default(),
         // Pinned off: a live RAM figure would make every capture depend on
         // the machine and moment it ran on.
         mem: None,
@@ -178,6 +184,39 @@ fn connecting() -> Model {
         },
         panel: crate::settings::Panel::default(),
     }
+}
+
+/// The gap after the gesture and before the daemon assigns the new id used to
+/// exist only as `session_id == None`, conflated with first boot. Keep it in the
+/// enumerable space because this is the latency-sensitive frame a user sees.
+fn starting_new_session() -> Model {
+    Model {
+        status: "starting a new session...".into(),
+        session_id: None,
+        working_dir: None,
+        ..attached_empty()
+    }
+}
+
+/// Existing-session navigation optimistically retargets the id while the attach
+/// RPC is outstanding. That is observably different from both detached and
+/// attached-empty, even though it deliberately renders an empty transcript.
+fn attach_in_flight() -> Model {
+    Model {
+        status: "attaching: session-demo-2".into(),
+        session_id: Some("session-demo-2".into()),
+        transcript: crate::transcript::Transcript::default(),
+        ..attached_empty()
+    }
+}
+
+/// A dropped connection preserves the current conversation while reporting
+/// recovery. It must not regress into the visually unrelated first-boot node.
+fn reconnecting() -> Model {
+    let mut model = attached_empty();
+    model.status = "connection lost; retrying in 500ms".into();
+    model.failure = Some("connection lost; retrying in 500ms".into());
+    model
 }
 
 /// Three frames of the boot reveal: the black opening, the donut half grown,
@@ -253,6 +292,7 @@ fn attached_empty() -> Model {
         transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
         resume: crate::resume::Picker::default(),
+        help_open: false,
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
@@ -275,7 +315,7 @@ fn attached_empty() -> Model {
         hint: 0,
         model: Some(fixed_model()),
         model_picker: crate::model_picker::Picker::default(),
-        strip: crate::strip::Strip::default(),
+        strips: crate::strip::Strips::default(),
         workspace: crate::workspace::Workspace::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
@@ -290,6 +330,7 @@ fn attached_empty() -> Model {
         // Fixed path, so captures do not depend on where the repo is checked
         // out or on whose `$HOME` the capture ran under.
         working_dir: Some("/home/j/jcode".into()),
+        file_tree: crate::file_tree::FileTree::default(),
         // Pinned off: a live RAM figure would make every capture depend on
         // the machine and moment it ran on.
         mem: None,
@@ -499,41 +540,41 @@ fn scrolled_back() -> Model {
 
 /// Several live sessions across two working directories: the case the strip
 /// exists for. Fixed ids so the bars are a pinned, testable arrangement.
-fn demo_strip(focused: &str) -> crate::strip::Strip {
-    crate::strip::Strip::build(
+fn demo_strip(focused: &str) -> crate::strip::Strips {
+    crate::strip::Strips::build(
         vec![
             // Weights differ by an order of magnitude, because that is what
             // the overview's blobs are for: a capture where every session is
             // the same size would prove nothing about the sizing.
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_clover_1785130341680_5a8db08".into(),
                 title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 480_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_mushroom_1785129393446_e7007f8".into(),
                 title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: true,
                 weight: 90_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_pebble_1785130002233_1c93aa4".into(),
                 title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 6_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_harbor_1785128881021_9f0b21d".into(),
                 title: None,
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
                 weight: 210_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_ember_1785131110907_44de7c2".into(),
                 title: None,
                 working_dir: Some("/home/j/site".into()),
@@ -554,7 +595,7 @@ fn session_strip() -> Model {
             ][..],
         ),
         session_id: Some("session_mushroom_1785129393446_e7007f8".into()),
-        strip: demo_strip("session_mushroom_1785129393446_e7007f8"),
+        strips: demo_strip("session_mushroom_1785129393446_e7007f8"),
         ..attached_empty()
     }
 }
@@ -577,7 +618,7 @@ fn mem_readout() -> Model {
 fn session_strip_second_group() -> Model {
     Model {
         session_id: Some("session_harbor_1785128881021_9f0b21d".into()),
-        strip: demo_strip("session_harbor_1785128881021_9f0b21d"),
+        strips: demo_strip("session_harbor_1785128881021_9f0b21d"),
         ..attached_empty()
     }
 }
@@ -627,8 +668,8 @@ fn overview_other_session() -> Model {
 /// One session. The field must still look deliberate rather than like a bug,
 /// which is the case a layout that only ever fits a crowd tends to get wrong.
 fn overview_single_session() -> Model {
-    let strip = crate::strip::Strip::build(
-        vec![crate::strip::Entry {
+    let strip = crate::strip::Strips::build(
+        vec![crate::strip::Panel {
             session_id: "session_willow_1785130555000_7d3e9f1".into(),
             title: None,
             working_dir: Some("/home/j/jcode".into()),
@@ -639,7 +680,7 @@ fn overview_single_session() -> Model {
     );
     Model {
         session_id: Some("session_willow_1785130555000_7d3e9f1".into()),
-        strip,
+        strips: strip,
         overview: crate::overview::Overview::pinned(
             true,
             1.0,
@@ -663,8 +704,8 @@ fn overview_many_sessions() -> Model {
             NAMES[n % NAMES.len()]
         )
     };
-    let entries: Vec<crate::strip::Entry> = (0..18)
-        .map(|n| crate::strip::Entry {
+    let entries: Vec<crate::strip::Panel> = (0..18)
+        .map(|n| crate::strip::Panel {
             session_id: id(n),
             title: None,
             working_dir: Some(format!("/home/j/proj{}", n % 4)),
@@ -674,10 +715,10 @@ fn overview_many_sessions() -> Model {
             weight: ((n * 7919) % 400) as f64 * 900.0 + 500.0,
         })
         .collect();
-    let strip = crate::strip::Strip::build(entries, Some(&id(3)));
+    let strip = crate::strip::Strips::build(entries, Some(&id(3)));
     Model {
         session_id: Some(id(3)),
-        strip,
+        strips: strip,
         // Highlight parked away from the attached session: the crowded field
         // is exactly where "where I am" and "where I am going" have to stay
         // distinguishable.
@@ -884,6 +925,13 @@ fn resume_picker_group() -> Model {
     }
 }
 
+fn help_overlay() -> Model {
+    Model {
+        help_open: true,
+        ..attached_empty()
+    }
+}
+
 /// The settings panel, open on an empty session: the state a user lands in
 /// the moment they click the gear.
 fn settings_panel() -> Model {
@@ -926,8 +974,19 @@ fn model_picker() -> Model {
         Some("openai-oauth:gpt-5.6".into()),
     );
     picker.set_hover(Some(1));
+    picker.advance(1.0);
     Model {
         model_picker: picker,
+        transcript: conversation(vec![
+            (
+                "Can you make the model chooser feel native to the conversation?".into(),
+                "Yes. I’ll open it inside the transcript and let the surrounding messages make room for it.".into(),
+            ),
+            (
+                "Keep it calm and keyboard-first.".into(),
+                "The picker will open with Ctrl+M, move with the arrow keys, and close without disturbing your draft.".into(),
+            ),
+        ]),
         ..attached_empty()
     }
 }
@@ -1243,7 +1302,10 @@ fn streaming() -> Model {
 /// blank screen. The activity line is the whole of the feedback here, so it is
 /// worth a node of its own.
 fn working() -> Model {
+    let mut transcript = crate::transcript::Transcript::default();
+    transcript.set_live_tool("", "thinking");
     Model {
+        transcript,
         busy: true,
         activity: crate::activity::Activity::pinned(
             5,
@@ -1264,6 +1326,7 @@ fn message_sent() -> Model {
     transcript.push(crate::transcript::Message::sent(
         "explain the harness API handshake",
     ));
+    transcript.set_live_tool("", "thinking");
     Model {
         transcript,
         busy: true,

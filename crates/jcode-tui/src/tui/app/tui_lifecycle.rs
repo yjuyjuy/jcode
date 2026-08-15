@@ -87,8 +87,11 @@ impl App {
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
     /// so without this poll a config.toml keybinding edit would only take
     /// effect after a restart. Called from the idle tick in both local and
-    /// remote run loops; the generation check makes the no-change path a
-    /// single atomic load. Returns true when bindings were re-parsed.
+    /// remote run loops, and again immediately before dispatching a key press
+    /// so an edit lands on the very next keystroke even when the run loop is
+    /// sitting at the 5s deep-idle cadence. The generation check makes the
+    /// no-change path a single atomic load. Returns true when bindings were
+    /// re-parsed.
     pub(super) fn refresh_keybindings_if_config_reloaded(&mut self) -> bool {
         // config() performs the throttled file-fingerprint staleness check and
         // bumps the reload generation when config.toml changed on disk.
@@ -109,6 +112,10 @@ impl App {
         self.fallback_switch_key = keybind::load_fallback_switch_key();
         self.scroll_keys = keybind::load_scroll_keys();
         crate::logging::info("KEYBINDINGS: reloaded from config change");
+        // Confirm the pickup to the user. Without this, an edit that is
+        // already live is indistinguishable from one that silently did
+        // nothing, which is the main source of "did that actually apply?".
+        self.set_status_notice("Config reloaded from disk");
         true
     }
 
@@ -450,6 +457,7 @@ impl App {
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
+            last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -893,6 +901,7 @@ impl App {
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
+            last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -1316,10 +1325,24 @@ impl App {
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
 
+        let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // One-shot handoff flag. A later ordinary resume in the same process
+        // must retain the existing eager local-history behavior.
+        crate::env::remove_var("JCODE_RELOAD_FAST_START");
+
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
-            app.restore_remote_startup_history(session_id);
-            if fresh_spawn {
+            if reload_fast_start {
+                crate::logging::info(&format!(
+                    "Remote reload fast start: deferring persisted transcript for {} until server history",
+                    session_id
+                ));
+            } else {
+                app.restore_remote_startup_history(session_id);
+            }
+            if fresh_spawn && !reload_fast_start {
                 crate::logging::info(&format!(
                     "Remote startup fresh-spawn path: restored persisted transcript for {} while awaiting server history",
                     session_id

@@ -34,6 +34,38 @@ const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
 
+#[cfg(unix)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+/// Route ordinary `cargo` invocations (including those inside child scripts)
+/// through the repository wrapper. Besides applying the project's build policy,
+/// that wrapper appends real action timings to rust-actions.jsonl.
+#[cfg(unix)]
+fn wrap_repo_cargo_commands(command: &str, working_dir: Option<&Path>) -> Option<String> {
+    let working_dir = working_dir?;
+    let repo = crate::build::find_repo_in_ancestors(working_dir)?;
+    let wrapper = repo.join("scripts").join("dev_cargo.sh");
+    if !wrapper.is_file() {
+        return None;
+    }
+
+    Some(format!(
+        r#"export JCODE_DEV_CARGO_SCRIPT={wrapper}
+cargo() {{
+  if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
+    command cargo "$@"
+  else
+    JCODE_IN_DEV_CARGO=1 "$JCODE_DEV_CARGO_SCRIPT" "$@"
+  fi
+}}
+export -f cargo
+{command}"#,
+        wrapper = shell_single_quote(&wrapper.to_string_lossy()),
+    ))
+}
+
 /// Build a clear timeout message. The `timeout` param is in milliseconds, which
 /// agents frequently mistake for seconds (e.g. passing 1000 thinking it means
 /// 1000s when it is 1s). Spell out the seconds equivalent and, for suspiciously
@@ -523,6 +555,13 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
     }
 }
 
+fn configure_background_command_stdio(command: &mut TokioCommand) {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
+
 #[cfg(unix)]
 fn build_detached_shell_wrapper(command: &str) -> StdCommand {
     let mut cmd = StdCommand::new("bash");
@@ -698,6 +737,12 @@ impl Tool for BashTool {
             ctx.working_dir.clone(),
         ) {
             return Err(anyhow::anyhow!(refusal));
+        }
+
+        #[cfg(unix)]
+        if let Some(wrapped) = wrap_repo_cargo_commands(&params.command, ctx.working_dir.as_deref())
+        {
+            params.command = wrapped;
         }
 
         if run_in_background {
@@ -1122,9 +1167,8 @@ impl BashTool {
 							Ok(())
 						});
 					}
-					cmd.kill_on_drop(true)
-						.stdout(Stdio::piped())
-						.stderr(Stdio::piped());
+                    cmd.kill_on_drop(true);
+                    configure_background_command_stdio(&mut cmd);
                     if let Some(ref dir) = working_dir {
                         cmd.current_dir(dir);
                     }

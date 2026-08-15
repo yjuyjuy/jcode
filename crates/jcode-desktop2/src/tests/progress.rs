@@ -17,7 +17,7 @@ fn app_with_harness() -> (App, std::sync::mpsc::Sender<harness::HarnessUpdate>) 
     let mut app = App::default();
     app.model.session_id = Some("session_test".into());
     app.model.donut = None;
-    app.harness = Some((update_rx, outgoing_tx));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(outgoing_tx)));
     (app, update_tx)
 }
 
@@ -165,10 +165,10 @@ fn switching_sessions_drops_the_bars() {
     app.drain_harness_updates();
     assert_eq!(cards(&app).len(), 1);
 
-    app.model.strip = crate::strip::Strip::build(
+    app.model.strips = crate::strip::Strips::build(
         vec![
-            crate::strip::Entry::new("session_test", Some("/tmp/a")),
-            crate::strip::Entry::new("session_other", Some("/tmp/b")),
+            crate::strip::Panel::new("session_test", Some("/tmp/a")),
+            crate::strip::Panel::new("session_other", Some("/tmp/b")),
         ],
         Some("session_other"),
     );

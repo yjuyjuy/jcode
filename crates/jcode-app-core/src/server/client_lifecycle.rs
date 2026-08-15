@@ -112,6 +112,7 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     submission_nonce: Option<String>,
+    active_skill: Option<String>,
 }
 
 struct ProcessingState<'a> {
@@ -542,7 +543,7 @@ pub(super) async fn handle_client(
                 last_seen: connected_at,
                 is_processing: false,
                 current_tool_name: None,
-                terminal_env: Vec::new(),
+                terminal_env: active_terminal_env.clone(),
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -1110,6 +1111,7 @@ pub(super) async fn handle_client(
                 content,
                 images,
                 system_reminder,
+                active_skill,
                 no_reply,
                 submission_nonce,
             } => {
@@ -1154,6 +1156,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         submission_nonce,
+                        active_skill,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1442,21 +1445,18 @@ pub(super) async fn handle_client(
                     });
                     continue;
                 }
+                // Every Subscribe carries an authoritative snapshot. An empty
+                // snapshot must clear terminal vars inherited by the daemon
+                // rather than retaining a prior pane's values.
+                active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.client_instance_id = client_instance_id.clone();
-                        // Record the client's terminal env so spawn/focus hooks
-                        // target the client's terminal, not the server's stale
-                        // startup env (#405). Only overwrite when the client sent
-                        // something, so reconnects without env don't clobber it.
-                        if !terminal_env.is_empty() {
-                            info.terminal_env = terminal_env.clone();
-                        }
+                        info.terminal_env = active_terminal_env.clone();
                     }
                 }
-                active_terminal_env = terminal_env.clone();
                 if let Some(target_session_id) = target_session_id {
                     if crate::session::session_exists(&target_session_id) {
                         let pre_resume_session_id = client_session_id.clone();
@@ -2888,6 +2888,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         submission_nonce,
+        active_skill,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -2907,9 +2908,23 @@ async fn start_processing_message(
         return;
     }
 
-    // The submission is now accepted (past the reload and busy gates and about
-    // to append + run). Record its nonce so any later busy/disconnect re-send of
-    // the same logical submission is short-circuited as a duplicate.
+    if !agent
+        .lock()
+        .await
+        .set_remote_active_skill(active_skill.clone())
+    {
+        let skill_name = active_skill.as_deref().unwrap_or_default();
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Skill '{skill_name}' is not installed on the server"),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    // The submission is now accepted (past the reload, busy, and skill gates and
+    // about to append + run). Record its nonce so any later busy/disconnect
+    // re-send of the same logical submission is short-circuited as a duplicate.
     message_nonce_tracker.record(submission_nonce.as_deref());
 
     *state.client_is_processing = true;
