@@ -1271,6 +1271,13 @@ pub struct ProviderConfig {
     /// reorders priority. Empty leaves `priority` with nothing to rank, so it
     /// falls back to exhaustion-only behavior.
     pub account_priority: Vec<String>,
+    /// When true (default), a freshly started session aligns its active
+    /// Anthropic account to whatever the external `cswap` (claude-swap) manager
+    /// currently has selected, joined by email. This prevents a respawned
+    /// session from starting on a stale cached account and immediately hitting a
+    /// rate limit. No-op when `cswap` is not installed, so it is safe to leave
+    /// on. Overridable via `JCODE_CSWAP_SYNC`.
+    pub cswap_sync: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1304,6 +1311,7 @@ impl Default for ProviderConfig {
             pace_aware_account_balancing: true,
             account_selection_strategy: AccountSelectionStrategy::default(),
             account_priority: Vec::new(),
+            cswap_sync: true,
             copilot_premium: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,

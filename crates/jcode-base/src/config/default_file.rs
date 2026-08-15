@@ -389,6 +389,12 @@ preserve_reasoning_context = true
 # never the positional claude-1/claude-2 numbering, so relabeling accounts never
 # silently reorders priority. Overridable via JCODE_ACCOUNT_PRIORITY (comma-separated).
 # account_priority = ["primary@example.com", "backup@example.com"]
+# Align a freshly started session's active Anthropic account to whatever the
+# external cswap (claude-swap) manager currently has selected, joined by email.
+# Prevents a respawned session from starting on a stale cached account and
+# immediately hitting a rate limit. No-op when cswap is not installed, so it is
+# safe to leave on (default true). Overridable via JCODE_CSWAP_SYNC.
+# cswap_sync = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
