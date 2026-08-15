@@ -293,6 +293,17 @@ impl App {
         if self.pending_provider_failover.is_some() {
             return false;
         }
+        // Never nudge the user toward a model downgrade for an ACCOUNT problem:
+        // if this is a rate-limit / account failure and another Anthropic
+        // account still has headroom, the automatic reactive account switch
+        // will retry the SAME model on the live account, so suppress the
+        // model-fallback offer entirely. Only fall through to the model offer
+        // when no account has quota.
+        if error_looks_like_rate_limit(error)
+            && crate::provider::anthropic_has_alternate_account_with_headroom()
+        {
+            return false;
+        }
         let routes = self.fallback_candidate_routes();
         if routes.is_empty() {
             return false;
