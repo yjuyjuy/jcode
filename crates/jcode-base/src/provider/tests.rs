@@ -1068,6 +1068,7 @@ include!("tests/model_resolution.rs");
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
+include!("tests/reactive_switch_stays_on_claude.rs");
 
 /// Rendering the route catalog must never schedule network work.
 ///

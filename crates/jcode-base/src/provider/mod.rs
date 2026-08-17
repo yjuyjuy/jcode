@@ -672,6 +672,23 @@ impl MultiProvider {
             if let Some(detail) = provider_unavailability_detail_for_account(key) {
                 let note = format!("{}: {}", label, detail);
                 if candidate == active {
+                    // The active provider carries a transient, account-scoped
+                    // unavailability mark (for example the one a mid-turn
+                    // reactive 429 account switch records, or a mark still
+                    // aging inside its window). A drained *account* is not a
+                    // dead *provider*: before proposing a cross-provider switch
+                    // - which resends the whole prompt to a different provider
+                    // - try this provider's other accounts first. Only fall
+                    // through to the cross-provider prompt when every sibling
+                    // account also failed.
+                    if let Some(stream) = self
+                        .try_same_provider_account_failover(
+                            candidate, messages, tools, mode, &detail, &mut notes,
+                        )
+                        .await?
+                    {
+                        return Ok(stream);
+                    }
                     crate::logging::warn(&format!(
                         "Failover{}: skipping active provider {} - {}",
                         mode.log_suffix(),
