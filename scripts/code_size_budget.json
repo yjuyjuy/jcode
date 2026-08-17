@@ -83,7 +83,7 @@
     "crates/jcode-tui/src/tui/app/model_context.rs": 1975,
     "crates/jcode-tui/src/tui/app/navigation.rs": 1921,
     "crates/jcode-tui/src/tui/app/onboarding_flow_control.rs": 1754,
-    "crates/jcode-tui/src/tui/app/remote.rs": 2149,
+    "crates/jcode-tui/src/tui/app/remote.rs": 2155,
     "crates/jcode-tui/src/tui/app/remote/key_handling.rs": 2629,
     "crates/jcode-tui/src/tui/app/remote/server_events.rs": 2832,
     "crates/jcode-tui/src/tui/app/run_shell.rs": 1411,
