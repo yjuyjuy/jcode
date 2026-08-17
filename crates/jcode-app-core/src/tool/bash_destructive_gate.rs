@@ -69,11 +69,11 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             },
             "notify": {
                 "type": "boolean",
-                "description": "Notify on completion."
+                "description": "Notify on completion. Defaults to true."
             },
             "wake": {
                 "type": "boolean",
-                "description": "Wake on completion."
+                "description": "Wake the agent when the task completes, re-driving it across a turn boundary. Defaults to true so a background task cannot silently sleep an idle agent with work in flight; pass false to opt out."
             },
             "justification": {
                 "type": "string",

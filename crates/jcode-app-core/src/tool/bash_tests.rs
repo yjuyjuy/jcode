@@ -879,6 +879,50 @@ fn test_bash_tool_schema_advertises_background_progress_guidance() {
     );
 }
 
+#[test]
+fn test_background_wake_defaults_to_true_when_unspecified() {
+    // A background task armed without an explicit `wake` must default to
+    // waking the agent on completion, so an idle agent with work in flight
+    // cannot silently sleep forever (missed-wake stall class). An explicit
+    // `wake: false` stays honored as opt-out.
+    let implicit: BashInput = serde_json::from_value(json!({
+        "command": "echo hi",
+        "run_in_background": true,
+    }))
+    .expect("deserialize background input without wake");
+    assert!(
+        implicit.wake,
+        "wake should default to true when not specified"
+    );
+    assert!(
+        implicit.notify,
+        "notify should default to true when not specified"
+    );
+
+    let opt_out: BashInput = serde_json::from_value(json!({
+        "command": "echo hi",
+        "run_in_background": true,
+        "wake": false,
+    }))
+    .expect("deserialize background input with explicit wake=false");
+    assert!(
+        !opt_out.wake,
+        "explicit wake:false must be honored as opt-out"
+    );
+}
+
+#[test]
+fn test_bash_schema_documents_wake_default() {
+    let schema = BashTool::new().parameters_schema();
+    let wake_description = schema["properties"]["wake"]["description"]
+        .as_str()
+        .expect("wake description should be a string");
+    assert!(
+        wake_description.contains("Defaults to true"),
+        "wake description should state the true default, was: {wake_description}"
+    );
+}
+
 // Destructive-command gate integration (#604).
 //
 // The unit-level policy is covered in jcode-command-risk. These tests pin the
