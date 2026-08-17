@@ -919,3 +919,17 @@ Add `--dry-run` to preview what would be removed without deleting anything.
 | **Termux** aarch64 / x86_64 | Supported with `pkg install glibc patchelf` |
 
 </div>
+
+## Fork improvements
+
+This repository ([yjuyjuy/jcode](https://github.com/yjuyjuy/jcode)) is a fork of
+[1jehuang/jcode](https://github.com/1jehuang/jcode) with substantial additions over upstream.
+The improvements below are carried by this fork.
+
+- Added automatic account switching: cswap-aligned startup selection and reactive 429 failover with no model downgrade, plus opt-in ranked-priority account selection and poll-driven re-evaluation between turns.
+- Added an agent-callable compact_context tool so a session can reclaim its own context window mid-task.
+- Added a live-session account-switch control surface (ADR 0031 Phase 1) and surfaced which Claude credential source is actually active.
+- Converged Anthropic and OpenAI usage on a shared account-labeled cache key so /usage stops self-storming 429s.
+- Queued skill invocations and user submissions mid-turn instead of rejecting them, with an opt-in one-per-turn queue drain and submission-nonce dedup.
+- Fixed ScheduleWakeup OAuth schema and account-balancing bugs, stopped blocking Opus for Claude Pro OAuth accounts, and surfaced memory-extraction outages instead of failing silently.
+- Kept the fork synced with upstream and its CI green.
