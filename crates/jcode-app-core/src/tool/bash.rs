@@ -694,7 +694,7 @@ struct BashInput {
     run_in_background: Option<bool>,
     #[serde(default = "default_true")]
     notify: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     wake: bool,
     /// Set only when re-issuing a call the gate refused (#604).
     #[serde(default)]
