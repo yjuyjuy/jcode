@@ -1147,3 +1147,108 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+#[test]
+fn one_per_turn_remote_drain_waits_for_the_agent_turn_to_end() {
+    // Regression (real session 2026-08-17): with `queue_drain_one_per_turn`
+    // enabled and two messages queued, the remote drain released the WHOLE
+    // queue at the first turn boundary - both queued messages were delivered
+    // back-to-back with no agent turn in between. It must deliver exactly one
+    // queued message per agent turn: the second may only dispatch after the
+    // turn started by the first has ended.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.queue_drain_one_per_turn = true;
+    app.queued_messages.push("message one".to_string());
+    app.queued_messages.push("message two".to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    // First turn boundary (previous agent turn just ended): exactly one message
+    // may go out.
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+    assert!(
+        app.is_processing,
+        "dispatching a queued message must start a turn"
+    );
+    assert_eq!(
+        app.queued_messages,
+        vec!["message two".to_string()],
+        "the second queued message must not be dispatched until the first turn has ended"
+    );
+    let user_messages: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(
+        user_messages,
+        vec!["message one"],
+        "only the first queued message may be echoed at the first boundary"
+    );
+
+    // The turn for message one is still running: the next queued message must
+    // stay queued no matter how often the dispatcher runs.
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(
+        app.queued_messages,
+        vec!["message two".to_string()],
+        "a busy turn must hold the next queued message"
+    );
+
+    // The agent turn for message one ends: message two may now go out.
+    app.is_processing = false;
+    app.status = crate::tui::app::ProcessingStatus::Idle;
+    app.current_message_id = None;
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+    assert!(
+        app.is_processing,
+        "the second queued message should start its own turn"
+    );
+    assert!(
+        app.queued_messages.is_empty(),
+        "both queued messages should be dispatched after two turns"
+    );
+    let user_messages: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(
+        user_messages,
+        vec!["message one", "message two"],
+        "each queued message should be echoed as its own turn"
+    );
+}
+
+#[test]
+fn combine_remote_drain_still_sends_the_whole_queue_at_once() {
+    // Default (opt-out) behavior unchanged: without the one-per-turn flag, a
+    // turn boundary drains every queued message in a single request.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.queued_messages.push("message one".to_string());
+    app.queued_messages.push("message two".to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+    assert!(app.is_processing);
+    assert!(
+        app.queued_messages.is_empty(),
+        "combine mode must keep draining the whole queue at once"
+    );
+}

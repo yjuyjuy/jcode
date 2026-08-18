@@ -243,8 +243,11 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
 
     if !app.is_processing && !app.queued_messages.is_empty() {
-        let queued_messages = std::mem::take(&mut app.queued_messages);
-        let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
+        // One-per-turn mode pops only the FIRST queued message (riding hidden
+        // reminders included) so each queued message becomes its own turn; the
+        // rest wait for their own turn boundary. Default (combine) mode takes
+        // the whole queue as before.
+        let (queued_messages, hidden_reminders) = app.take_next_queued_batch();
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
@@ -1490,8 +1493,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             }
         }
     } else if !app.queued_messages.is_empty() {
-        let queued_messages = std::mem::take(&mut app.queued_messages);
-        let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
+        // One-per-turn mode pops only the FIRST queued message (riding hidden
+        // reminders included) so each queued message becomes its own turn; the
+        // rest wait for their own turn boundary. Default (combine) mode takes
+        // the whole queue as before.
+        let (queued_messages, hidden_reminders) = app.take_next_queued_batch();
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
