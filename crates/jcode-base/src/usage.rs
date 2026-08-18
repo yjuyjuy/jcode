@@ -683,5 +683,20 @@ fn active_openai_usage_report(results: &[ProviderUsage]) -> Option<&ProviderUsag
         })
 }
 
+/// Seed the shared Anthropic usage cache for one account label so a
+/// `account_usage_probe_sync` call resolves that account's window ratios
+/// offline, without a live OAuth usage fetch. Test-only: lets failover tests
+/// drive multi-account decisions deterministically.
+#[cfg(test)]
+pub fn seed_anthropic_account_usage_for_tests(label: &str, five_hour: f32, seven_day: f32) {
+    let data = UsageData {
+        five_hour,
+        seven_day,
+        fetched_at: Some(Instant::now()),
+        ..Default::default()
+    };
+    cache::store_anthropic_usage(format!("label:{label}"), data);
+}
+
 #[cfg(test)]
 mod tests;
