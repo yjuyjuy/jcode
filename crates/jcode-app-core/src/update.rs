@@ -26,7 +26,11 @@ use update_metadata::{record_release_update_duration, record_source_update_durat
 pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
-const GITHUB_REPO: &str = "1jehuang/jcode";
+const GITHUB_REPO: &str = "yjuyjuy/jcode";
+/// Default branch of `GITHUB_REPO`, used by the source-build ("main") update
+/// channel. The fork's default branch is `master`, not `main`, so this is
+/// parameterized alongside the repo rather than hard-coded at each git call.
+const GITHUB_BRANCH: &str = "master";
 /// Minimum gap between *automatic* update checks.
 ///
 /// Every automatic check costs one or two unauthenticated `api.github.com`
@@ -213,7 +217,10 @@ fn github_api_request(
 }
 
 fn latest_main_sha_blocking() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/commits/{}",
+        GITHUB_REPO, GITHUB_BRANCH
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
@@ -670,7 +677,7 @@ fn build_from_source() -> Result<PathBuf> {
         // Pull latest
         crate::logging::info("Main channel: pulling latest from main...");
         let output = std::process::Command::new("git")
-            .args(["pull", "--ff-only", "origin", "main"])
+            .args(["pull", "--ff-only", "origin", GITHUB_BRANCH])
             .current_dir(&repo_dir)
             .output()
             .context("Failed to run git pull")?;
@@ -680,7 +687,7 @@ fn build_from_source() -> Result<PathBuf> {
             let summary = summarize_git_pull_failure(&output.stderr);
             crate::logging::warn(&format!("{}, trying reset", summary));
             let output = std::process::Command::new("git")
-                .args(["fetch", "origin", "main"])
+                .args(["fetch", "origin", GITHUB_BRANCH])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git fetch")?;
@@ -691,7 +698,7 @@ fn build_from_source() -> Result<PathBuf> {
                 );
             }
             let output = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/main"])
+                .args(["reset", "--hard", &format!("origin/{}", GITHUB_BRANCH)])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git reset")?;
@@ -708,7 +715,13 @@ fn build_from_source() -> Result<PathBuf> {
         let clone_url = format!("https://github.com/{}.git", GITHUB_REPO);
         let output = std::process::Command::new("git")
             .args([
-                "clone", "--depth", "1", "--branch", "main", &clone_url, "jcode",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                GITHUB_BRANCH,
+                &clone_url,
+                "jcode",
             ])
             .current_dir(&build_dir)
             .output()
