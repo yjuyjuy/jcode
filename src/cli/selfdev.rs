@@ -12,7 +12,7 @@ use super::provider_init::ProviderChoice;
 pub use jcode_selfdev_types::CLIENT_SELFDEV_ENV;
 pub use jcode_selfdev_types::client_selfdev_requested;
 
-const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
+const JCODE_REPO_URL: &str = "https://github.com/yjuyjuy/jcode.git";
 
 fn selfdev_clone_dir() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("source").join("jcode"))
