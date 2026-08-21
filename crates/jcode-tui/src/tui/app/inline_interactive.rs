@@ -36,6 +36,16 @@ const MODEL_PICKER_USAGE_VERSION: u8 = 1;
 const MODEL_PICKER_FAVORITES_FILE: &str = "model_picker_favorites.json";
 const MODEL_PICKER_FAVORITES_VERSION: u8 = 1;
 
+/// How long an empty model-picker route list keeps showing the loading
+/// ("waiting for provider…") state before it is treated as a genuine
+/// no-models failure.
+///
+/// A provider catalog refresh on a loaded shared server usually lands within
+/// a second or two (a manual `/model` retry "seconds later" succeeds), so four
+/// seconds covers the transient not-ready window without hanging a genuinely
+/// broken session for long.
+const MODEL_PICKER_NOT_READY_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteModelCatalogCache {
     version: u8,
@@ -1062,6 +1072,10 @@ impl App {
 
     fn open_model_picker_inner(&mut self, preserve_input: bool) {
         let picker_started = std::time::Instant::now();
+        // Each open restarts the bounded not-ready wait: a fresh user trigger
+        // (or a catalog push that reaches real routes) starts from a clean
+        // slate rather than inheriting a stale deadline from an earlier open.
+        self.model_picker_not_ready_since = None;
         const RECENT_AUTH_BOOST_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
         if self
             .recent_authenticated_provider
@@ -1135,6 +1149,7 @@ impl App {
                 routes_ms,
                 preserve_input,
                 false,
+                false,
             );
             if self.inline_interactive_state.is_some() {
                 self.set_status_notice("Updating model routes…");
@@ -1158,6 +1173,7 @@ impl App {
                     routes_ms,
                     preserve_input,
                     true,
+                    false,
                 );
                 return;
             }
@@ -1181,6 +1197,7 @@ impl App {
                     routes,
                     routes_ms,
                     preserve_input,
+                    false,
                     false,
                 );
                 if self.inline_interactive_state.is_some() {
@@ -1220,6 +1237,7 @@ impl App {
             routes_ms,
             preserve_input,
             true,
+            false,
         );
     }
 
@@ -1260,6 +1278,60 @@ impl App {
             preview: false,
         });
         self.set_status_notice("Updating model list…");
+    }
+
+    /// Routes came back empty after dedupe/filtering. Two meanings need
+    /// opposite handling:
+    ///
+    /// 1. TRANSIENT not-ready: a provider/model-list refresh is still in
+    ///    flight, or has not yet been attempted for this open (for example a
+    ///    fresh remote session before the server's model catalog arrives, or
+    ///    a local provider whose catalog is mid-hydrate). Show the loading
+    ///    picker ("waiting for provider…") and drive the existing background
+    ///    route load within a bounded window.
+    /// 2. GENUINE unavailable: a completed background route load came back
+    ///    empty (`load_completed`), or the bounded window elapsed with no
+    ///    routes landing. Only then surface the login-suggesting
+    ///    `no_models_available_message`.
+    fn handle_empty_model_routes(
+        &mut self,
+        current_model: String,
+        cache_signature: ModelPickerCacheSignature,
+        picker_started: std::time::Instant,
+        load_completed: bool,
+    ) -> Vec<crate::provider::ModelRoute> {
+        let refresh_pending = !load_completed
+            || self.pending_model_picker_load.is_some()
+            || self.auth_catalog_refresh_pending;
+        let within_window = self
+            .model_picker_not_ready_since
+            .is_none_or(|since| since.elapsed() < MODEL_PICKER_NOT_READY_WINDOW);
+
+        if refresh_pending && within_window {
+            // Waiting for the in-flight provider/model-list refresh.
+            self.model_picker_not_ready_since
+                .get_or_insert_with(std::time::Instant::now);
+            self.open_loading_model_picker(&current_model);
+            // Drive the existing background route load when one is not already
+            // running. In a remote session the catalog arrives from the server
+            // as an `AvailableModelsUpdated` push (which reopens this picker),
+            // so a client-side route load over an empty client catalog cannot
+            // help and is skipped.
+            if !self.is_remote && self.pending_model_picker_load.is_none() {
+                self.start_model_picker_route_load(cache_signature, picker_started);
+            }
+            return Vec::new();
+        }
+
+        // Genuinely unavailable: a completed refresh returned nothing, or the
+        // bounded wait elapsed. Keep the login guidance.
+        self.model_picker_not_ready_since = None;
+        self.inline_interactive_state = None;
+        self.push_display_message(DisplayMessage::system(
+            crate::tui::app::model_context::no_models_available_message(self.is_remote),
+        ));
+        self.set_status_notice("No models available");
+        Vec::new()
     }
 
     fn start_model_picker_route_load(
@@ -1306,6 +1378,29 @@ impl App {
     }
 
     pub(super) fn poll_model_picker_load(&mut self) -> bool {
+        // Enforce the bounded not-ready wait on every tick so a provider whose
+        // catalog never arrives (or whose route load keeps coming back empty)
+        // still surfaces the genuine "no models" message instead of showing the
+        // loading picker forever. Remote sessions reuse this tick as their
+        // wait clock: the client deliberately skips the useless local route
+        // load there and waits for the server's catalog push instead.
+        if let Some(since) = self.model_picker_not_ready_since
+            && since.elapsed() >= MODEL_PICKER_NOT_READY_WINDOW
+            && self
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(picker_is_runtime_model_picker)
+        {
+            let is_remote = self.is_remote;
+            self.model_picker_not_ready_since = None;
+            self.inline_interactive_state = None;
+            self.push_display_message(DisplayMessage::system(
+                crate::tui::app::model_context::no_models_available_message(is_remote),
+            ));
+            self.set_status_notice("No models available");
+            return true;
+        }
+
         let Some(pending) = self.pending_model_picker_load.as_ref() else {
             return false;
         };
@@ -1370,6 +1465,7 @@ impl App {
                     result.routes_ms,
                     true,
                     true,
+                    true,
                 );
                 if self.inline_interactive_state.is_some() {
                     self.set_status_notice("Model list updated");
@@ -1383,6 +1479,12 @@ impl App {
         }
     }
 
+    /// `load_completed` distinguishes a routes-empty call that is the fresh
+    /// result of a background route load from an initial open; see
+    /// `handle_empty_model_routes`. Each argument is a distinct axis of the
+    /// picker-open contract, so the full signature stays explicit (same
+    /// allowance as `log_model_routes_summary`).
+    #[allow(clippy::too_many_arguments)]
     fn open_model_picker_with_routes(
         &mut self,
         cache_signature: ModelPickerCacheSignature,
@@ -1391,6 +1493,7 @@ impl App {
         routes_ms: u128,
         preserve_input: bool,
         cache_entries: bool,
+        load_completed: bool,
     ) -> Vec<crate::provider::ModelRoute> {
         use std::collections::BTreeMap;
 
@@ -1457,13 +1560,16 @@ impl App {
         );
 
         if routes.is_empty() {
-            self.inline_interactive_state = None;
-            self.push_display_message(DisplayMessage::system(
-                crate::tui::app::model_context::no_models_available_message(self.is_remote),
-            ));
-            self.set_status_notice("No models available");
-            return routes;
+            return self.handle_empty_model_routes(
+                current_model,
+                cache_signature,
+                picker_started,
+                load_completed,
+            );
         }
+
+        // Real routes landed: whatever transient wait was in flight is over.
+        self.model_picker_not_ready_since = None;
 
         let grouping_started = std::time::Instant::now();
         let mut model_order: Vec<String> = Vec::new();
@@ -1907,6 +2013,7 @@ impl App {
         let previous_model_picker_cache = self.model_picker_cache.clone();
         let previous_pending_model_picker_load = self.pending_model_picker_load.take();
         let previous_model_picker_load_request_id = self.model_picker_load_request_id;
+        let previous_model_picker_not_ready_since = self.model_picker_not_ready_since.take();
         let previous_input = self.input.clone();
         let previous_cursor_pos = self.cursor_pos;
         let previous_status_notice = self.status_notice.clone();
@@ -1992,8 +2099,9 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        let routes =
-            self.open_model_picker_with_routes(signature, started, routes, routes_ms, false, false);
+        let routes = self.open_model_picker_with_routes(
+            signature, started, routes, routes_ms, false, false, false,
+        );
         let picker_json = self.debug_picker_state_json(visible_limit);
         let picker_value: serde_json::Value = serde_json::from_str(&picker_json)
             .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize picker" }));
@@ -2019,6 +2127,7 @@ impl App {
         self.model_picker_cache = previous_model_picker_cache;
         self.pending_model_picker_load = previous_pending_model_picker_load;
         self.model_picker_load_request_id = previous_model_picker_load_request_id;
+        self.model_picker_not_ready_since = previous_model_picker_not_ready_since;
         if took_remote_options && self.remote_model_options.is_empty() {
             // Restore only routes that originated from remote_model_options.
             // Lightweight fallback routes carry placeholder "remote-catalog"
@@ -4333,5 +4442,161 @@ mod tests {
             filter_routes_by_provider_allowlist(routes, Some(&["  ".to_string()]), "x").len(),
             2
         );
+    }
+
+    // --- Model picker not-ready handling --------------------------------
+
+    /// Minimal provider with no models and no routes. Stands in for a local
+    /// session whose provider genuinely has nothing to offer; the picker must
+    /// still surface the login guidance for this case.
+    struct EmptyModelProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for EmptyModelProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            Err(anyhow::anyhow!("test provider never streams"))
+        }
+
+        fn name(&self) -> &str {
+            "empty"
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(Self)
+        }
+    }
+
+    fn with_isolated_picker_home<T>(f: impl FnOnce() -> T) -> T {
+        let _env_guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let saved_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", &temp.path());
+        let result = f();
+        match saved_home {
+            Some(home) => crate::env::set_var("JCODE_HOME", home),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        result
+    }
+
+    fn not_ready_test_app() -> App {
+        let provider: std::sync::Arc<dyn crate::provider::Provider> =
+            std::sync::Arc::new(EmptyModelProvider);
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        App::new_for_test_harness(provider, registry)
+    }
+
+    /// Drain the background model-picker route load until its result has been
+    /// consumed (or the bounded not-ready window expires), mirroring the
+    /// poll loop the production tick calls every frame.
+    fn drain_model_picker_load(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.pending_model_picker_load.is_some() && std::time::Instant::now() < deadline {
+            app.poll_model_picker_load();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // One final poll converts the last completed load into a redraw
+        // decision and expires the bounded window check.
+        app.poll_model_picker_load();
+    }
+
+    fn displays_no_models_message(app: &App) -> bool {
+        app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("No models are available"))
+    }
+
+    /// A fresh remote session opens `/model` before the server's model
+    /// catalog has arrived. That is a TRANSIENT not-ready state: the picker
+    /// must show the loading/"waiting for provider" state and recover once the
+    /// catalog lands, never emit the "No models are available" login message.
+    #[test]
+    fn model_picker_waits_then_recovers_when_remote_catalog_not_yet_arrived() {
+        with_isolated_picker_home(|| {
+            let mut app = not_ready_test_app();
+            app.is_remote = true;
+            app.remote_provider_name = Some("claude".to_string());
+            app.remote_provider_model = None;
+            app.remote_available_entries.clear();
+            app.remote_model_options.clear();
+
+            app.open_model_picker();
+
+            assert!(
+                !displays_no_models_message(&app),
+                "transient empty catalog must not emit the no-models login message"
+            );
+            assert!(
+                app.inline_interactive_state
+                    .as_ref()
+                    .is_some_and(picker_is_runtime_model_picker),
+                "loading picker must stay open while waiting for the provider"
+            );
+
+            // The server catalog lands a moment later; reopen the picker.
+            app.remote_available_entries = vec!["claude-sonnet-4".to_string()];
+            app.remote_provider_model = Some("claude-sonnet-4".to_string());
+            app.open_model_picker();
+
+            let picker = app
+                .inline_interactive_state
+                .as_ref()
+                .expect("picker opens once the catalog arrives");
+            assert!(
+                picker
+                    .entries
+                    .iter()
+                    .any(|entry| entry.name == "claude-sonnet-4"),
+                "cataloged model should appear in the picker"
+            );
+            assert!(
+                !displays_no_models_message(&app),
+                "a recovered catalog must never show the no-models message"
+            );
+        });
+    }
+
+    /// A local provider that genuinely has no models (background route load
+    /// completes empty) must STILL show the "No models are available" login
+    /// guidance after the transient wait, so a real no-models state is not
+    /// converted into an endless loading spinner.
+    #[test]
+    fn model_picker_still_reports_no_models_when_refresh_completes_empty() {
+        with_isolated_picker_home(|| {
+            let mut app = not_ready_test_app();
+
+            app.open_model_picker();
+
+            // Initially transient: the synchronous snapshot is empty, so the
+            // picker waits instead of failing immediately.
+            assert!(!displays_no_models_message(&app));
+            assert!(
+                app.inline_interactive_state
+                    .as_ref()
+                    .is_some_and(picker_is_runtime_model_picker),
+                "picker should show the loading state during the bounded wait"
+            );
+
+            // The bounded wait drives one background route load; that load
+            // completes empty, which is grounded evidence of a genuinely
+            // unavailable provider.
+            drain_model_picker_load(&mut app);
+
+            assert!(
+                displays_no_models_message(&app),
+                "genuinely-empty provider must still surface the login guidance"
+            );
+            assert!(
+                app.inline_interactive_state.is_none(),
+                "picker closes after the genuine no-models failure"
+            );
+        });
     }
 }
