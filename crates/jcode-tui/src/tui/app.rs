@@ -1397,6 +1397,14 @@ pub struct App {
     auth_catalog_refresh_pending: bool,
     pending_model_picker_load: Option<PendingModelPickerLoad>,
     model_picker_load_request_id: u64,
+    /// Set while the model picker is inside its bounded "waiting for
+    /// provider…" retry window: a routes-empty open found a provider/model
+    /// list refresh still in flight or not yet attempted, so instead of
+    /// failing hard with the login suggestion it shows the loading picker and
+    /// keeps polling for up to `MODEL_PICKER_NOT_READY_WINDOW`. Cleared as
+    /// soon as real routes land, and enforced by the poll loop so a genuinely
+    /// unavailable provider still surfaces the no-models message.
+    model_picker_not_ready_since: Option<Instant>,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
