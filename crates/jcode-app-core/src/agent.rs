@@ -252,6 +252,11 @@ pub struct Agent {
     /// Prevent duplicate content uploads when shutdown/finalization is invoked
     /// more than once for the same in-memory agent.
     transcript_telemetry_sent: bool,
+    /// Latch ensuring the pre-compact action flow runs at most once per turn
+    /// loop (a threshold that stays crossed after a compaction must not re-fire
+    /// the in-session action within the same turn). Reset at each user-turn
+    /// entry point.
+    pre_compact_flow_ran: bool,
 }
 
 impl Agent {
@@ -306,6 +311,7 @@ impl Agent {
             inline_output_tap: false,
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
+            pre_compact_flow_ran: false,
         };
         crate::tool::set_session_tool_policy(
             &agent.session.id,
@@ -572,6 +578,7 @@ impl Agent {
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
+        self.pre_compact_flow_ran = false;
     }
 
     /// Synchronize the remote client's selected skill, accepting only names

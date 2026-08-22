@@ -163,6 +163,12 @@ pub struct CompactionManager {
     /// compaction must stay disabled until a genuinely new message is added.
     suppress_compaction_until_new_message: bool,
 
+    /// When true, a configured pre-compact action is currently running. Soft
+    /// compaction checks are suspended while it executes so the pre-action turn
+    /// runs to completion BEFORE the compaction starts (the emergency hard
+    /// compact path does not consult this flag).
+    pre_compact_in_progress: bool,
+
     /// Token budget
     token_budget: usize,
 
@@ -217,6 +223,7 @@ impl CompactionManager {
             pending_cutoff: 0,
             total_turns: 0,
             suppress_compaction_until_new_message: false,
+            pre_compact_in_progress: false,
             token_budget: DEFAULT_TOKEN_BUDGET,
             observed_input_tokens: None,
             last_compaction: None,
@@ -238,6 +245,62 @@ impl CompactionManager {
     pub fn with_budget(mut self, budget: usize) -> Self {
         self.token_budget = budget;
         self
+    }
+
+    #[cfg(test)]
+    pub fn with_pre_compact_action(mut self, action: Option<String>) -> Self {
+        self.compaction_config.pre_compact_action = action;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_blocking_compact(mut self, blocking: bool) -> Self {
+        self.compaction_config.blocking_compact = blocking;
+        self
+    }
+
+    /// The configured in-session pre-compact action, if any (whitespace-only
+    /// counts as unconfigured). Snapshot from config at construction, like the
+    /// compaction mode.
+    pub fn pre_compact_action(&self) -> Option<&str> {
+        self.compaction_config
+            .pre_compact_action
+            .as_deref()
+            .map(str::trim)
+            .filter(|action| !action.is_empty())
+    }
+
+    /// Whether blocking compaction mode is enabled (snapshot from config at
+    /// construction). When true, a soft-threshold crossing pauses the turn loop
+    /// until the pre-compact action and the compaction have both completed.
+    pub fn blocking_compact(&self) -> bool {
+        self.compaction_config.blocking_compact
+    }
+
+    /// Mark a configured pre-compact action as running (or finished). While
+    /// set, `should_compact_with` returns false so the pre-action turn runs to
+    /// completion before the compaction starts. The emergency hard-compact path
+    /// never consults this flag.
+    pub fn set_pre_compact_in_progress(&mut self, in_progress: bool) {
+        self.pre_compact_in_progress = in_progress;
+    }
+
+    /// Whether a pre-compact action is currently running.
+    pub fn pre_compact_in_progress(&self) -> bool {
+        self.pre_compact_in_progress
+    }
+
+    /// Whether the current context usage is at or above the critical
+    /// (hard-compact) threshold. Pre-compact actions and blocking mode never
+    /// run at or above this threshold: the emergency hard-compact path owns it.
+    pub fn is_at_critical_threshold_with(&self, all_messages: &[Message]) -> bool {
+        self.context_usage_with(all_messages) >= CRITICAL_THRESHOLD
+    }
+
+    /// Whether a compaction event is pending application (used by the turn loop
+    /// to detect that a blocking compaction completed).
+    pub fn has_compaction_event(&self) -> bool {
+        self.last_compaction.is_some()
     }
 
     /// Update the token budget (e.g., when model changes)
@@ -837,7 +900,7 @@ impl CompactionManager {
     /// Check if we should start compaction
     pub fn should_compact_with(&self, all_messages: &[Message]) -> bool {
         use crate::config::CompactionMode;
-        if self.suppress_compaction_until_new_message {
+        if self.suppress_compaction_until_new_message || self.pre_compact_in_progress {
             return false;
         }
         let active = self.active_messages(all_messages);

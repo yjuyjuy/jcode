@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::compaction::{PreCompactActionSpec, PreCompactTurnMode};
 use crate::agent::environment::EnvSnapshotDetail;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -1074,6 +1075,7 @@ async fn memory_injection_message_defaults_to_ephemeral_history() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
+    force_reactive_compaction(&agent);
     let before = agent.session.messages.len();
     let memory = crate::memory::PendingMemory {
         prompt: "# Memory\n\n## Facts\n1. Use ephemeral mode".to_string(),
@@ -1107,6 +1109,7 @@ async fn memory_injection_message_can_persist_to_history() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
+    force_reactive_compaction(&agent);
     let before = agent.session.messages.len();
     let memory = crate::memory::PendingMemory {
         prompt: "# Memory\n\n## Facts\n1. Persist for cache".to_string(),
@@ -1859,4 +1862,400 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
     );
+}
+
+// ── Pre-compact action / blocking-compact mode ───────────────────────────
+
+/// Provider used for pre-compact flow tests: streams a plain text reply (so a
+/// sub-turn terminates), reports a compact context window, and returns an
+/// instant summary for compaction generation.
+#[derive(Clone)]
+struct PreCompactProvider;
+
+#[async_trait]
+impl Provider for PreCompactProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta(
+                    "pre-compact sub-turn reply".to_string(),
+                )))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "precompact-fake"
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    fn uses_jcode_compaction(&self) -> bool {
+        true
+    }
+
+    fn context_window(&self) -> usize {
+        10_000
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(PreCompactProvider)
+    }
+
+    async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
+        Ok("pre-compact summary".to_string())
+    }
+}
+
+const PRE_COMPACT_MARKER: &str = "pre-compact marker turn";
+
+/// The compaction manager snapshots the GLOBAL config at construction, and the
+/// local test machine's config may select proactive mode. Pin reactive mode so
+/// these tests exercise the soft-threshold path deterministically.
+fn force_reactive_compaction(agent: &Agent) {
+    let compaction = agent.registry.compaction();
+    if let Ok(mut manager) = compaction.try_write() {
+        manager.set_mode(crate::config::CompactionMode::Reactive);
+    }
+}
+
+
+/// Configure the pre-compact knobs through their env overrides for one test,
+/// so the real wiring (env -> config -> manager snapshot -> agent flow) is
+/// exercised. The caller restores env and invalidates the config cache.
+fn setup_pre_compact_env(action: &str, blocking: bool) -> (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
+    let prev_action = std::env::var_os("JCODE_PRE_COMPACT_ACTION");
+    let prev_blocking = std::env::var_os("JCODE_BLOCKING_COMPACT");
+    crate::env::set_var("JCODE_PRE_COMPACT_ACTION", action);
+    if blocking {
+        crate::env::set_var("JCODE_BLOCKING_COMPACT", "on");
+    } else {
+        crate::env::remove_var("JCODE_BLOCKING_COMPACT");
+    }
+    crate::config::invalidate_config_cache();
+    (prev_action, prev_blocking)
+}
+
+fn restore_pre_compact_env(
+    prev_action: Option<std::ffi::OsString>,
+    prev_blocking: Option<std::ffi::OsString>,
+) {
+    if let Some(previous) = prev_action {
+        crate::env::set_var("JCODE_PRE_COMPACT_ACTION", previous);
+    } else {
+        crate::env::remove_var("JCODE_PRE_COMPACT_ACTION");
+    }
+    if let Some(previous) = prev_blocking {
+        crate::env::set_var("JCODE_BLOCKING_COMPACT", previous);
+    } else {
+        crate::env::remove_var("JCODE_BLOCKING_COMPACT");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+fn pre_compact_marker_text(message: &crate::session::StoredMessage) -> bool {
+    matches!(
+        &message.content[0],
+        ContentBlock::Text { text, .. } if text == PRE_COMPACT_MARKER
+    )
+}
+
+#[test]
+fn pre_compact_action_resolution_forms() {
+    let skills = SkillRegistry::default();
+    assert_eq!(
+        Agent::resolve_pre_compact_action("", &skills),
+        None,
+        "empty action is unconfigured"
+    );
+    assert_eq!(
+        Agent::resolve_pre_compact_action("  ", &skills),
+        None,
+        "whitespace-only action is unconfigured"
+    );
+    assert_eq!(
+        Agent::resolve_pre_compact_action("cmd:echo hi", &skills),
+        Some(PreCompactActionSpec::Command("echo hi".to_string()))
+    );
+    assert_eq!(
+        Agent::resolve_pre_compact_action("prompt:sweep the conversation", &skills),
+        Some(PreCompactActionSpec::Prompt(
+            "sweep the conversation".to_string()
+        ))
+    );
+    // A bare string that is not an installed skill behaves as a prompt.
+    assert_eq!(
+        Agent::resolve_pre_compact_action("stow", &skills),
+        Some(PreCompactActionSpec::Prompt("stow".to_string()))
+    );
+    // An empty skill: or cmd: target is not resolvable.
+    assert_eq!(Agent::resolve_pre_compact_action("skill:", &skills), None);
+    assert_eq!(Agent::resolve_pre_compact_action("cmd:   ", &skills), None);
+}
+
+#[tokio::test]
+async fn pre_compact_skill_spec_activates_skill_and_injects_slash_message() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(PreCompactProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    agent
+        .run_pre_compact_action_turn(
+            PreCompactActionSpec::Skill("stow".to_string()),
+            PreCompactTurnMode::Plain,
+        )
+        .await
+        .expect("skill sub-turn should complete");
+
+    // The slot invocation became a user message and the sub-turn replied.
+    assert!(
+        agent.session.messages.iter().any(|message| matches!(
+            &message.content[0],
+            ContentBlock::Text { text, .. } if text == "/stow"
+        )),
+        "a skill action should inject /<name> as the user message"
+    );
+    assert!(
+        matches!(
+            &agent.session.messages.last().expect("messages exist").content[0],
+            ContentBlock::Text { text, .. } if text.contains("pre-compact sub-turn reply")
+        ),
+        "the skill sub-turn should complete with a model reply"
+    );
+    assert_eq!(
+        agent.active_skill, None,
+        "the active skill must be restored after the pre-compact sub-turn"
+    );
+}
+
+#[tokio::test]
+async fn pre_compact_action_runs_as_sub_turn_before_background_compaction() {
+    let _guard = crate::storage::lock_test_env();
+    let (prev_action, prev_blocking) =
+        setup_pre_compact_env(&format!("prompt:{PRE_COMPACT_MARKER}"), false);
+
+    let provider: Arc<dyn Provider> = Arc::new(PreCompactProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    force_reactive_compaction(&agent);
+    // ~83% usage: above the 80% soft threshold, below the 95% critical one.
+    for i in 0..30 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {i} {}", "x".repeat(1_100)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    agent
+        .run_pre_compact_flow_if_due(PreCompactTurnMode::Plain)
+        .await;
+
+    // Action first: the prompt became a user message and the sub-turn replied,
+    // before any compaction was triggered.
+    assert!(
+        agent.session.messages.iter().any(pre_compact_marker_text),
+        "the pre-compact action should run as an in-session sub-turn first"
+    );
+    assert!(
+        matches!(
+            &agent.session.messages.last().expect("messages exist").content[0],
+            ContentBlock::Text { text, .. } if text.contains("pre-compact sub-turn reply")
+        ),
+        "the pre-compact sub-turn should complete with a model reply"
+    );
+
+    // Non-blocking: the compaction then completes through the regular path.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut applied = false;
+    while Instant::now() < deadline {
+        let (_, maybe_event) = agent.messages_for_provider();
+        if maybe_event.is_some() {
+            applied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        applied,
+        "background compaction should complete after the pre-compact action ran"
+    );
+    assert!(
+        agent.session.compaction.is_some(),
+        "compaction state should be persisted to the session"
+    );
+
+    restore_pre_compact_env(prev_action, prev_blocking);
+}
+
+#[tokio::test]
+async fn blocking_compact_pauses_turn_until_compaction_applies() {
+    let _guard = crate::storage::lock_test_env();
+    let (prev_action, prev_blocking) =
+        setup_pre_compact_env(&format!("prompt:{PRE_COMPACT_MARKER}"), true);
+
+    let provider: Arc<dyn Provider> = Arc::new(PreCompactProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    force_reactive_compaction(&agent);
+    for i in 0..30 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {i} {}", "x".repeat(1_100)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    let before = agent.session.messages.len();
+
+    agent
+        .run_pre_compact_flow_if_due(PreCompactTurnMode::Plain)
+        .await;
+
+    assert!(
+        agent.session.messages.iter().any(pre_compact_marker_text),
+        "the pre-compact action should run before the blocking compaction"
+    );
+
+    // Blocking: the flow must not return until the compaction completed and
+    // applied, so the next model call sees the compacted context.
+    let compaction = agent.registry.compaction();
+    let manager = compaction.try_read().expect("compaction lock");
+    assert!(
+        manager.has_compaction_event(),
+        "blocking compaction should have applied before the flow returned"
+    );
+    assert!(
+        !manager.is_compacting(),
+        "blocking compaction should not still be in flight"
+    );
+    drop(manager);
+
+    let (messages, event) = agent.messages_for_provider();
+    assert!(
+        event.is_some(),
+        "the completed compaction event surfaces at the next provider-message build"
+    );
+    assert!(
+        messages.len() < before,
+        "the next model call should see the compacted context"
+    );
+
+    restore_pre_compact_env(prev_action, prev_blocking);
+}
+
+#[tokio::test]
+async fn pre_compact_flow_is_inert_at_critical_threshold() {
+    let _guard = crate::storage::lock_test_env();
+    let (prev_action, prev_blocking) =
+        setup_pre_compact_env(&format!("prompt:{PRE_COMPACT_MARKER}"), true);
+
+    let provider: Arc<dyn Provider> = Arc::new(PreCompactProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    force_reactive_compaction(&agent);
+    // ~120% usage: far above the 95% critical threshold. A pre-compact action
+    // turn must never run here - it would itself need context.
+    for i in 0..20 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {i} {}", "x".repeat(2_400)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    agent
+        .run_pre_compact_flow_if_due(PreCompactTurnMode::Plain)
+        .await;
+
+    assert!(
+        !agent.session.messages.iter().any(pre_compact_marker_text),
+        "a context-limit emergency must never block on a pre-compact action turn"
+    );
+
+    // The existing emergency hard-compact path still fires immediately.
+    let (_, event) = agent.messages_for_provider();
+    assert!(
+        event.is_some(),
+        "the emergency hard compact should still fire and surface an event"
+    );
+    assert!(
+        agent.session.compaction.is_some(),
+        "emergency compaction state should be persisted"
+    );
+
+    restore_pre_compact_env(prev_action, prev_blocking);
+}
+
+#[tokio::test]
+async fn pre_compact_streaming_mode_streams_the_sub_turn_to_the_client() {
+    let _guard = crate::storage::lock_test_env();
+    let (prev_action, prev_blocking) =
+        setup_pre_compact_env(&format!("prompt:{PRE_COMPACT_MARKER}"), false);
+
+    let provider: Arc<dyn Provider> = Arc::new(PreCompactProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    force_reactive_compaction(&agent);
+    for i in 0..30 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {i} {}", "x".repeat(1_100)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_pre_compact_flow_if_due(PreCompactTurnMode::Streaming(tx))
+        .await;
+
+    // The in-session action still ran as a sub-turn...
+    assert!(
+        agent.session.messages.iter().any(pre_compact_marker_text),
+        "the pre-compact action should run as an in-session sub-turn first"
+    );
+    // ...and its reply streamed to the attached client.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_sub_turn_text = false;
+    while Instant::now() < deadline {
+        match rx.recv().await {
+            Some(ServerEvent::TextDelta { text }) if text.contains("pre-compact sub-turn reply") => {
+                saw_sub_turn_text = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(
+        saw_sub_turn_text,
+        "the pre-compact sub-turn should stream to the client"
+    );
+
+    restore_pre_compact_env(prev_action, prev_blocking);
 }

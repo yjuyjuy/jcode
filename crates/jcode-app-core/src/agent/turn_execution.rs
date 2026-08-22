@@ -4,6 +4,7 @@ use crate::{terminal_eprintln as eprintln, terminal_println as println};
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        self.pre_compact_flow_ran = false;
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -29,6 +30,7 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
+        self.pre_compact_flow_ran = false;
         self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -70,6 +72,7 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
+        self.pre_compact_flow_ran = false;
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
         if !alerts.is_empty() {

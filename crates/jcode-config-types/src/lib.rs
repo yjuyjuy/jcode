@@ -422,6 +422,29 @@ pub struct CompactionConfig {
 
     /// [semantic] Number of recent turns to look at for building the "current goal" embedding
     pub goal_window_turns: usize,
+
+    /// In-session action jcode runs synchronously BEFORE a proactive/soft-threshold
+    /// compaction starts, so durable knowledge can be written while the full
+    /// conversation is still visible.
+    ///
+    /// Supported forms:
+    /// - `skill:<name>` or a bare installed skill name (e.g. `"stow"`) - the skill
+    ///   runs as a real in-session sub-turn, exactly as if the user had typed
+    ///   `/name`. The skill prompt is loaded into the system prompt and the slash
+    ///   invocation becomes a user message.
+    /// - `prompt:<text>` (and any bare string that is not an installed skill) - the
+    ///   text is injected as a user message and processed as a turn.
+    /// - `cmd:<command>` - the external command runs via the shell before compaction.
+    ///
+    /// Empty or unset: no pre-compact action (today's behavior).
+    pub pre_compact_action: Option<String>,
+
+    /// When true, crossing the proactive/soft-threshold compaction pauses the turn
+    /// loop: the pre-compact action (if configured) and the compaction both run to
+    /// completion before the next model call, instead of starting a background
+    /// compaction and continuing. The emergency hard-compact path (context-limit
+    /// recovery) is never affected by this flag. Default: false.
+    pub blocking_compact: bool,
 }
 
 impl Default for CompactionConfig {
@@ -437,6 +460,8 @@ impl Default for CompactionConfig {
             topic_shift_threshold: 0.45,
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
+            pre_compact_action: None,
+            blocking_compact: false,
         }
     }
 }

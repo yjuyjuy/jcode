@@ -610,6 +610,33 @@ swarm_max_concurrent_agents = 32
 # JCODE_HOOK_ERROR.
 # post_tool = ""
 
+[compaction]
+# Context compaction: summarizing older conversation to stay inside the context
+# window. Today's defaults are reactive compaction with no pre-compact action
+# and background (non-blocking) compaction.
+#
+# Pre-compact action: an in-session action jcode runs synchronously BEFORE a
+# proactive/soft-threshold compaction starts, so durable knowledge (e.g. a
+# firstmate /stow sweep) can be written while the full conversation is still
+# visible. Because a bare external hook cannot run an in-session skill, the
+# in-session forms are what make this structural:
+#   "stow" or "skill:stow" - run the installed skill as a real sub-turn, as if
+#                            the user typed /stow
+#   "prompt:<text>"        - inject the text as a user message and run the turn
+#   "cmd:<command>"        - run an external command via the shell first
+# A bare string that is not an installed skill name is injected as a prompt.
+# Empty or unset: no pre-compact action (default).
+# Env override: JCODE_PRE_COMPACT_ACTION (set empty to disable).
+# pre_compact_action = "stow"
+#
+# Blocking compaction: when true, crossing the proactive/soft-threshold pauses
+# the turn loop and runs (pre-compact action, then compaction) to completion
+# before the next model call, instead of continuing with a background
+# compaction. The emergency hard-compact path (context-limit recovery) is never
+# affected by this flag. Default: false.
+# Env override: JCODE_BLOCKING_COMPACT (true/false).
+blocking_compact = false
+
 [ambient]
 # Ambient mode: background agent that maintains your codebase
 # Enable ambient mode (default: false)
@@ -745,6 +772,24 @@ mod tests {
         assert!(
             template.contains("/colors"),
             "the template should point at the /colors command"
+        );
+    }
+
+    /// The pre-compact knobs are discoverable through the generated config file.
+    #[test]
+    fn default_config_template_documents_pre_compact_knobs() {
+        let template = Config::default_config_file_contents();
+        assert!(
+            template.contains("[compaction]"),
+            "the template should document a compaction section"
+        );
+        assert!(
+            template.contains("pre_compact_action"),
+            "the template should document pre_compact_action"
+        );
+        assert!(
+            template.contains("blocking_compact"),
+            "the template should document blocking_compact"
         );
     }
 

@@ -373,3 +373,259 @@ impl Agent {
         };
     }
 }
+
+/// How the pre-compact action sub-turn executes, matching the turn loop that
+/// invoked the flow.
+pub(super) enum PreCompactTurnMode {
+    /// Plain (non-streaming) turn loop: the sub-turn runs silently.
+    Plain,
+    /// Streaming turn loop: the sub-turn streams events to the attached client.
+    Streaming(mpsc::UnboundedSender<ServerEvent>),
+}
+
+/// Resolved form of a configured pre-compact action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PreCompactActionSpec {
+    /// Run the named skill as an in-session sub-turn (user message `/<name>`).
+    Skill(String),
+    /// Inject the raw text as a user message and process it as a turn.
+    Prompt(String),
+    /// Run an external command via the shell before compaction.
+    Command(String),
+}
+
+impl Agent {
+    /// Run the configured pre-compact action ahead of a proactive/soft-threshold
+    /// compaction, and in blocking mode wait for that compaction to complete and
+    /// apply before returning.
+    ///
+    /// Called at the top of each turn-loop iteration, right before the provider
+    /// request is built. It is a safe no-op unless a pre-compact action is
+    /// configured, a compaction is actually due (`should_compact_with`), the
+    /// context is below the critical threshold, and the flow has not already run
+    /// this turn.
+    ///
+    /// When the pre-compact action is set, jcode runs it synchronously first (an
+    /// in-session skill or prompt sub-turn, or an external command), then lets
+    /// the compaction proceed. With blocking mode on, the compaction is started
+    /// and waited on, so the next model call sees the compacted context; the wait
+    /// is bounded and degrades to the regular in-flight apply path on timeout.
+    ///
+    /// The emergency hard-compact path (context-limit recovery) is deliberately
+    /// out of scope: at or above the critical threshold this flow does nothing,
+    /// so a context-limit emergency never blocks on a skill turn that itself
+    /// needs context.
+    pub(super) async fn run_pre_compact_flow_if_due(&mut self, mode: PreCompactTurnMode) {
+        if self.pre_compact_flow_ran {
+            return;
+        }
+        let (action, blocking) = {
+            let compaction = self.registry.compaction();
+            let Ok(manager) = compaction.try_read() else {
+                return;
+            };
+            let Some(action) = manager.pre_compact_action() else {
+                return;
+            };
+            let all_messages = self.session.provider_messages();
+            if manager.is_at_critical_threshold_with(all_messages) {
+                return;
+            }
+            if !manager.should_compact_with(all_messages) {
+                return;
+            }
+            (action.to_string(), manager.blocking_compact())
+        };
+
+        self.pre_compact_flow_ran = true;
+        // Hold the manager's soft-tier checks (including the sub-turn's own loop)
+        // suspended until the action has run to completion, so the ordering is
+        // always action first, then compaction. Hard-compact stays untouched.
+        if let Ok(mut manager) = self.registry.compaction().try_write() {
+            manager.set_pre_compact_in_progress(true);
+        }
+
+        let skills = self.current_skills_snapshot();
+        match Self::resolve_pre_compact_action(&action, &skills) {
+            Some(spec) => {
+                if let Err(error) = self.run_pre_compact_action_turn(spec, mode).await {
+                    logging::warn(&format!(
+                        "Pre-compact action failed; continuing with compaction: {}",
+                        error
+                    ));
+                }
+            }
+            None => {
+                logging::warn(&format!(
+                    "Pre-compact action could not be resolved ({action:?}); continuing with compaction"
+                ));
+            }
+        }
+
+        if let Ok(mut manager) = self.registry.compaction().try_write() {
+            manager.set_pre_compact_in_progress(false);
+        }
+
+        if blocking {
+            self.run_blocking_compaction().await;
+        }
+    }
+
+    /// Resolve a configured pre-compact action into an executable form against
+    /// the given skill registry.
+    pub(super) fn resolve_pre_compact_action(
+        raw: &str,
+        skills: &SkillRegistry,
+    ) -> Option<PreCompactActionSpec> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if let Some(command) = raw.strip_prefix("cmd:") {
+            let command = command.trim();
+            return (!command.is_empty())
+                .then(|| PreCompactActionSpec::Command(command.to_string()));
+        }
+        if let Some(prompt) = raw.strip_prefix("prompt:") {
+            let prompt = prompt.trim();
+            return (!prompt.is_empty())
+                .then(|| PreCompactActionSpec::Prompt(prompt.to_string()));
+        }
+        let name = if let Some(name) = raw.strip_prefix("skill:") {
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            name
+        } else {
+            raw
+        };
+        if skills.get(name).is_some() {
+            return Some(PreCompactActionSpec::Skill(name.to_string()));
+        }
+        // A bare string that is not an installed skill name behaves as a prompt.
+        Some(PreCompactActionSpec::Prompt(raw.to_string()))
+    }
+
+    /// Execute a resolved pre-compact action.
+    pub(super) async fn run_pre_compact_action_turn(
+        &mut self,
+        spec: PreCompactActionSpec,
+        mode: PreCompactTurnMode,
+    ) -> Result<()> {
+        match spec {
+            PreCompactActionSpec::Skill(name) => {
+                let previous_skill = self.active_skill.take();
+                self.active_skill = Some(name.clone());
+                let result = self
+                    .run_pre_compact_user_turn(&format!("/{name}"), mode)
+                    .await;
+                self.active_skill = previous_skill;
+                result
+            }
+            PreCompactActionSpec::Prompt(text) => self.run_pre_compact_user_turn(&text, mode).await,
+            PreCompactActionSpec::Command(command) => self.run_pre_compact_command(&command).await,
+        }
+    }
+
+    /// Append the action message as a user message and run a full turn to
+    /// completion (the in-session form of the pre-compact action).
+    async fn run_pre_compact_user_turn(
+        &mut self,
+        user_message: &str,
+        mode: PreCompactTurnMode,
+    ) -> Result<()> {
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: user_message.to_string(),
+                cache_control: None,
+            }],
+        );
+        self.session.save()?;
+        // The sub-turn re-enters the turn loop, which again consults this flow
+        // (guarded by the in-progress flag). Box the recursive edge so the
+        // future stays a fixed size.
+        match mode {
+            PreCompactTurnMode::Plain => {
+                Box::pin(self.run_turn(false)).await?;
+            }
+            PreCompactTurnMode::Streaming(event_tx) => {
+                Box::pin(self.run_turn_streaming_mpsc(event_tx)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Run the external-command form of the pre-compact action via the shell.
+    /// Mirrors the lifecycle-hook environment conventions (`JCODE_HOOKS_DISABLED`,
+    /// `JCODE_HOOK_EVENT`) so hook commands can detect a nested jcode and skip it.
+    async fn run_pre_compact_command(&self, command: &str) -> Result<()> {
+        let status = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("JCODE_HOOKS_DISABLED", "1")
+            .env("JCODE_HOOK_EVENT", "pre_compact")
+            .env("JCODE_HOOK_SESSION_ID", self.session.id.clone())
+            .status()
+            .await?;
+        if !status.success() {
+            return Err(anyhow::anyhow!(
+                "pre-compact command exited with {status}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Start the soft-threshold compaction (blocking mode) and wait for it to
+    /// complete and apply before returning, so the next model call sees the
+    /// compacted context. Bounded: on timeout the turn continues and the
+    /// in-flight summary is applied by the regular completion path.
+    async fn run_blocking_compaction(&mut self) {
+        const BLOCKING_COMPACT_WAIT: Duration = Duration::from_secs(180);
+        const BLOCKING_COMPACT_POLL: Duration = Duration::from_millis(100);
+
+        let messages = self.session.messages_for_provider();
+        let compaction = self.registry.compaction();
+        let mut manager = match compaction.try_write() {
+            Ok(manager) => manager,
+            Err(_) => {
+                logging::warn("Blocking compaction skipped: compaction manager lock busy");
+                return;
+            }
+        };
+        // Starts the same background task the non-blocking path would start; the
+        // only difference is that we wait for it here.
+        manager.maybe_start_compaction_with(&messages, self.provider.clone());
+        if !manager.is_compacting() {
+            // Nothing to compact after all (cutoff/safety checks rejected it).
+            return;
+        }
+        let deadline = Instant::now() + BLOCKING_COMPACT_WAIT;
+        loop {
+            manager.check_and_apply_compaction_with(&messages);
+            if manager.has_compaction_event() {
+                logging::info("[compaction] Blocking compaction applied before continuing the turn");
+                return;
+            }
+            if !manager.is_compacting() {
+                logging::warn(
+                    "[compaction] Blocking compaction did not apply (generation failed or aborted); continuing",
+                );
+                return;
+            }
+            if Instant::now() >= deadline {
+                logging::warn(
+                    "[compaction] Blocking compaction timed out; continuing with the in-flight summary",
+                );
+                return;
+            }
+            drop(manager);
+            tokio::time::sleep(BLOCKING_COMPACT_POLL).await;
+            manager = match compaction.try_write() {
+                Ok(manager) => manager,
+                Err(_) => return,
+            };
+        }
+    }
+}
