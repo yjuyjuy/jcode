@@ -27,6 +27,29 @@ pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
 const GITHUB_REPO: &str = "1jehuang/jcode";
+
+/// This fork's auto-updater is deliberately FROZEN.
+///
+/// The upstream GitHub repo (`GITHUB_REPO`) will diverge from this fork, so
+/// every network update path (release check, `commits/main`, `git clone`, asset
+/// download) is severed at the public entry points below. Nothing on this fork
+/// silently phones GitHub for an update; `jcode update` returns an honest error
+/// instead of hanging or pulling a repo that no longer matches. Updates happen
+/// only through the manual build-review-swap runbook.
+///
+/// The existing kill switch (`JCODE_NO_AUTO_UPDATE`) is preserved and still
+/// suppresses automatic checks independently of this freeze.
+const UPDATER_FROZEN: bool = true;
+
+/// One-line, user-facing reason returned when a frozen update path is invoked.
+const UPDATER_FROZEN_MESSAGE: &str =
+    "jcode auto-updater is frozen on this fork; update via the manual build-review-swap runbook (jcode self-dev --build), not `jcode update`.";
+
+/// Whether the auto-updater is frozen on this fork.
+pub fn updater_frozen() -> bool {
+    UPDATER_FROZEN
+}
+
 /// Minimum gap between *automatic* update checks.
 ///
 /// Every automatic check costs one or two unauthenticated `api.github.com`
@@ -109,6 +132,11 @@ fn source_build_repo_dir() -> Result<PathBuf> {
 }
 
 pub fn should_auto_update() -> bool {
+    // Frozen on this fork: never let an automatic path reach GitHub.
+    if UPDATER_FROZEN {
+        return false;
+    }
+
     if std::env::var("JCODE_NO_AUTO_UPDATE").is_ok() {
         return false;
     }
@@ -161,6 +189,10 @@ fn is_inside_git_repo(path: &std::path::Path) -> bool {
 }
 
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
+    // Frozen on this fork: error cleanly instead of reaching GitHub.
+    if UPDATER_FROZEN {
+        anyhow::bail!("{}", UPDATER_FROZEN_MESSAGE);
+    }
     let url = format!(
         "https://api.github.com/repos/{}/releases/latest",
         GITHUB_REPO
@@ -436,6 +468,10 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
 }
 
 pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
+    // Frozen on this fork: error cleanly instead of reaching GitHub.
+    if UPDATER_FROZEN {
+        anyhow::bail!("{}", UPDATER_FROZEN_MESSAGE);
+    }
     let channel = crate::config::config().features.update_channel;
     match channel {
         crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
@@ -548,6 +584,10 @@ pub fn spawn_background_session_update(session_id: String) {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
+    // Frozen on this fork: error cleanly instead of reaching GitHub.
+    if UPDATER_FROZEN {
+        anyhow::bail!("{}", UPDATER_FROZEN_MESSAGE);
+    }
     let channel = crate::config::config().features.update_channel;
     match channel {
         crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
@@ -941,6 +981,10 @@ pub fn download_and_install_blocking_with_progress(
     release: &GitHubRelease,
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf> {
+    // Frozen on this fork: error cleanly instead of reaching GitHub.
+    if UPDATER_FROZEN {
+        anyhow::bail!("{}", UPDATER_FROZEN_MESSAGE);
+    }
     let started = Instant::now();
     let asset_name = get_asset_name();
     let asset = release

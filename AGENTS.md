@@ -42,3 +42,18 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Auto-updater is frozen on this fork
+
+The GitHub auto-updater is deliberately disabled. See `UPDATER_FROZEN` in
+`crates/jcode-app-core/src/update.rs`: all update entry points error cleanly
+instead of reaching GitHub, and updates happen only via the manual
+build-review-swap runbook (`jcode self-dev --build`). The `JCODE_NO_AUTO_UPDATE`
+kill switch is preserved but independent.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
