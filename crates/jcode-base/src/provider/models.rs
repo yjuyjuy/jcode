@@ -906,25 +906,22 @@ pub fn clear_model_unavailable_for_account(model: &str) {
     OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(&scope, &model);
 }
 
-fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
-    let key = current_provider_runtime_scope_key(provider);
-
+/// Live (non-expired) unavailability mark for an explicit scope key.
+fn runtime_provider_unavailability_for_key(key: &str) -> Option<RuntimeProviderUnavailability> {
     let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write().ok()?;
-    if let Some(entry) = unavailable.get(&key) {
+    if let Some(entry) = unavailable.get(key) {
         if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
             return Some(entry.clone());
         }
-        unavailable.remove(&key);
+        unavailable.remove(key);
     }
     None
 }
 
-pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
-    let key = current_provider_runtime_scope_key(provider);
+fn record_provider_unavailable_for_scope_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
     }
-
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         unavailable.insert(
             key,
@@ -935,6 +932,20 @@ pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
             },
         );
     }
+}
+
+pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
+    record_provider_unavailable_for_scope_key(current_provider_runtime_scope_key(provider), reason);
+}
+
+/// Record a transient unavailability mark for one account label, regardless of
+/// which account is current. A drained account is not a dead provider: the mark
+/// names only the rate-limited account the reactive switch leaves.
+pub fn record_provider_unavailable_for_account_label(provider: &str, label: &str, reason: &str) {
+    record_provider_unavailable_for_scope_key(
+        provider_runtime_scope_key(provider, Some(label)),
+        reason,
+    );
 }
 
 pub fn clear_provider_unavailable_for_account(provider: &str) {
@@ -963,7 +974,23 @@ pub fn clear_all_provider_unavailability_for_account() {
 }
 
 pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
-    let entry = runtime_provider_unavailability(provider)?;
+    Some(format_provider_unavailability_detail(
+        runtime_provider_unavailability_for_key(&current_provider_runtime_scope_key(provider))?,
+    ))
+}
+
+/// Mark detail for one specific account label, regardless of which account is current.
+pub fn provider_unavailability_detail_for_account_label(
+    provider: &str,
+    label: &str,
+) -> Option<String> {
+    let key = provider_runtime_scope_key(provider, Some(label));
+    Some(format_provider_unavailability_detail(
+        runtime_provider_unavailability_for_key(&key)?,
+    ))
+}
+
+fn format_provider_unavailability_detail(entry: RuntimeProviderUnavailability) -> String {
     let mut detail = entry.reason;
     if let Ok(elapsed) = SystemTime::now().duration_since(entry.observed_at) {
         detail.push_str(&format!(
@@ -971,8 +998,7 @@ pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<Stri
             format_elapsed_duration_short(elapsed)
         ));
     }
-
-    Some(detail)
+    detail
 }
 
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {

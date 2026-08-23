@@ -225,10 +225,14 @@ pub fn reactive_switch_on_rate_limit(provider: ActiveProvider) -> Option<String>
 
     // Mark the account we just got rate-limited on as transiently unavailable so
     // the between-turns selection also routes around it until fresh usage data
-    // arrives.
+    // arrives. The mark is keyed to the EXHAUSTED account label only, never the
+    // provider as a whole: a drained account is not a dead provider, and the
+    // healthy sibling we just selected must stay usable on the next failover
+    // pass instead of being skipped into a cross-provider proposal.
     if provider == ActiveProvider::Claude {
-        crate::provider::models::record_provider_unavailable_for_account(
-            "anthropic",
+        crate::provider::models::record_provider_unavailable_for_account_label(
+            "claude",
+            &current_label,
             "reactive 429 rate-limit switch",
         );
     }

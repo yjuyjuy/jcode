@@ -317,8 +317,9 @@ pub use self::models::{
     persist_anthropic_model_catalog, persist_openai_model_catalog, populate_account_models,
     populate_anthropic_models, populate_context_limits, populate_context_limits_from_config,
     populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, record_model_unavailable_for_account,
-    record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
+    provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
+    record_model_unavailable_for_account, record_provider_unavailable_for_account,
+    record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_openai_model_catalog,
 };
