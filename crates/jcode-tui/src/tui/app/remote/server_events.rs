@@ -1286,6 +1286,26 @@ pub(in crate::tui::app) fn handle_server_event(
                     raw_input: app.last_submitted_input.clone(),
                 }
             });
+            // A cross-provider failover prompt is not a plain error: the server
+            // decided to fail over and expects the client to carry out the
+            // switch. On remote sessions this must arm the countdown auto-switch
+            // (config permitting) instead of being displayed as a dead error
+            // line that wedges the pane forever. Arm it BEFORE the cleanup below
+            // clears `rate_limit_pending_message`, since the countdown captures
+            // the resend payload from it.
+            if let Some(prompt) = crate::provider::parse_failover_prompt_message(&message) {
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.stream_message_ended = false;
+                app.thought_line_inserted = false;
+                app.thinking_prefix_emitted = false;
+                app.thinking_buffer.clear();
+                crate::tui::mermaid::clear_streaming_preview_diagram();
+                app.handle_provider_failover_prompt(prompt);
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                return true;
+            }
             app.push_display_message(DisplayMessage {
                 role: "error".to_string(),
                 content: message.clone(),

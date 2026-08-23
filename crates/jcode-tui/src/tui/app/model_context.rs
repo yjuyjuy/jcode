@@ -66,6 +66,61 @@ impl App {
         Ok(self.finalize_model_switch(&active_model))
     }
 
+    /// Pick the best available route whose provider matches the failover
+    /// prompt's target provider, for remote sessions that have no local
+    /// `MultiProvider` to `switch_active_provider_to`. Prefers a subscription
+    /// (OAuth) login over a metered API key, then original catalog order.
+    fn pick_failover_target_route(
+        &self,
+        to_provider: &str,
+    ) -> Option<crate::provider::ModelRoute> {
+        let routes = self.fallback_candidate_routes();
+        routes
+            .into_iter()
+            .filter(|route| route.available)
+            .filter(|route| {
+                crate::provider::model_route_provider_labels_match(&route.provider, to_provider)
+            })
+            .min_by_key(|route| {
+                // Lower sorts first: prefer OAuth/subscription logins.
+                let method = crate::provider::ModelRouteApiMethod::parse(&route.api_method);
+                let is_oauth = matches!(
+                    method,
+                    crate::provider::ModelRouteApiMethod::ClaudeOAuth
+                        | crate::provider::ModelRouteApiMethod::OpenAIOAuth
+                        | crate::provider::ModelRouteApiMethod::CodeAssistOAuth
+                );
+                u8::from(!is_oauth)
+            })
+    }
+
+    /// Remote counterpart to [`Self::apply_provider_switch_for_failover`]. A
+    /// remote session has no local provider to switch, so map the target
+    /// provider to a concrete route from the remote catalog and stage a
+    /// `SetRoute` for the dispatcher plus a resend of the failed turn's payload
+    /// (mirrors the remote branch of [`Self::apply_pending_fallback_offer`]).
+    /// Returns the target route's model label on success.
+    fn stage_remote_provider_switch_for_failover(
+        &mut self,
+        prompt: &crate::provider::ProviderFailoverPrompt,
+        remote_resend: Option<super::FallbackResendPayload>,
+    ) -> anyhow::Result<String> {
+        let route = self.pick_failover_target_route(&prompt.to_provider).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no available route for provider `{}` in this remote session",
+                prompt.to_provider
+            )
+        })?;
+        let selection = crate::provider::RouteSelection::from_model_route(&route);
+        let model = route.model.clone();
+        self.upstream_provider = None;
+        self.status_detail = None;
+        self.session.route_api_method = Some(selection.api_method.clone());
+        self.pending_route_selection = Some(selection);
+        self.pending_fallback_resend = remote_resend;
+        Ok(model)
+    }
+
     pub(super) fn cancel_pending_provider_failover(&mut self, notice: impl Into<String>) {
         let Some(pending) = self.pending_provider_failover.take() else {
             return;
@@ -96,35 +151,67 @@ impl App {
         }
 
         self.pending_provider_failover = None;
-        match self.apply_provider_switch_for_failover(&pending.prompt) {
-            Ok(active_model) => {
-                self.push_display_message(DisplayMessage::system(format!(
-                    "⚡ Auto-switched provider after countdown: {} → {}.\n\nResending {} on model {}.\n\n{}",
-                    pending.prompt.from_label,
-                    pending.prompt.to_label,
-                    Self::format_failover_input_summary(&pending.prompt),
-                    active_model,
-                    Self::failover_config_hint(),
-                )));
-                self.set_status_notice(format!(
-                    "Provider → {} (retrying)",
-                    pending.prompt.to_label
-                ));
-                self.pending_turn = true;
-                true
+        if self.is_remote {
+            // Remote sessions carry out the switch through the server: stage a
+            // route selection + a resend of the failed payload. The dispatcher
+            // (remote tick / key path) sends SetRoute and then resends.
+            let remote_resend = pending.resend.clone();
+            match self.stage_remote_provider_switch_for_failover(&pending.prompt, remote_resend) {
+                Ok(model) => {
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "⚡ Auto-switching provider after countdown: {} → {}.\n\nResending {} on {}.\n\n{}",
+                        pending.prompt.from_label,
+                        pending.prompt.to_label,
+                        Self::format_failover_input_summary(&pending.prompt),
+                        model,
+                        Self::failover_config_hint(),
+                    )));
+                    self.set_status_notice(format!(
+                        "Provider → {} (retrying)",
+                        pending.prompt.to_label
+                    ));
+                    true
+                }
+                Err(error) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Failed to switch provider to {}: {}",
+                        pending.prompt.to_label, error
+                    )));
+                    self.set_status_notice("Provider switch failed");
+                    true
+                }
             }
-            Err(error) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch provider to {}: {}",
-                    pending.prompt.to_label, error
-                )));
-                self.set_status_notice("Provider switch failed");
-                true
+        } else {
+            match self.apply_provider_switch_for_failover(&pending.prompt) {
+                Ok(active_model) => {
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "⚡ Auto-switched provider after countdown: {} → {}.\n\nResending {} on model {}.\n\n{}",
+                        pending.prompt.from_label,
+                        pending.prompt.to_label,
+                        Self::format_failover_input_summary(&pending.prompt),
+                        active_model,
+                        Self::failover_config_hint(),
+                    )));
+                    self.set_status_notice(format!(
+                        "Provider → {} (retrying)",
+                        pending.prompt.to_label
+                    ));
+                    self.pending_turn = true;
+                    true
+                }
+                Err(error) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Failed to switch provider to {}: {}",
+                        pending.prompt.to_label, error
+                    )));
+                    self.set_status_notice("Provider switch failed");
+                    true
+                }
             }
         }
     }
 
-    fn handle_provider_failover_prompt(&mut self, prompt: crate::provider::ProviderFailoverPrompt) {
+    pub(in crate::tui::app) fn handle_provider_failover_prompt(&mut self, prompt: crate::provider::ProviderFailoverPrompt) {
         let input_summary = Self::format_failover_input_summary(&prompt);
         let manual_message = format!(
             "⚠ {} became unavailable - jcode did not resend your prompt to {} automatically.\n\nReason: {}\n\nRetrying elsewhere would send {}.\n\nTo switch manually now, use /model and pick a model from {}, then resend. {}",
@@ -147,11 +234,13 @@ impl App {
                     prompt.from_label
                 ));
             }
-            crate::config::CrossProviderFailoverMode::Countdown if !self.is_remote => {
-                self.pending_provider_failover = Some(super::PendingProviderFailover {
-                    prompt: prompt.clone(),
-                    deadline: Instant::now() + Duration::from_secs(3),
-                });
+            crate::config::CrossProviderFailoverMode::Countdown => {
+                // Countdown fires for BOTH local and remote sessions. Remote
+                // fleet sessions have no human at the keyboard, so gating this
+                // on `!self.is_remote` (as it used to be) stranded every remote
+                // worker at a prompt nothing could answer. The switch itself is
+                // carried out per-session-kind in the countdown apply path.
+                self.arm_provider_failover_countdown(&prompt, Duration::from_secs(3));
                 self.push_display_message(DisplayMessage::system(format!(
                     "⚠ {} became unavailable - jcode will switch to {} in 3 seconds unless you cancel.\n\nReason: {}\n\nRetrying would send {}. Press Esc to cancel.\n\n{}",
                     prompt.from_label,
@@ -165,17 +254,57 @@ impl App {
                     prompt.to_label
                 ));
             }
-            _ => {
+            crate::config::CrossProviderFailoverMode::Manual => {
+                // Manual + remote: there is no human on this session to run
+                // /model, so a manual prompt would wedge forever. An unanswered
+                // failover prompt must not be terminal - fall back to an
+                // automatic switch after a longer grace window than countdown,
+                // so a human who *is* watching still has time to intervene with
+                // Esc, but an unattended fleet worker recovers on its own.
+                self.arm_provider_failover_countdown(&prompt, Duration::from_secs(30));
                 self.push_display_message(DisplayMessage::system(format!(
-                    "{}\n\nAutomatic countdown switching is only available in local sessions right now.",
-                    manual_message,
+                    "⚠ {} became unavailable and this is a remote session with no interactive manual switch. jcode will switch to {} in 30 seconds unless you cancel.\n\nReason: {}\n\nRetrying would send {}. Press Esc to cancel.\n\n{}",
+                    prompt.from_label,
+                    prompt.to_label,
+                    prompt.reason,
+                    input_summary,
+                    Self::failover_config_hint(),
                 )));
                 self.set_status_notice(format!(
-                    "{} unavailable; manual switch suggested",
-                    prompt.from_label
+                    "Provider auto-switch → {} in 30s (Esc to cancel)",
+                    prompt.to_label
                 ));
             }
         }
+    }
+
+    /// Arm the cancelable provider-failover countdown. Captures the failed
+    /// turn's payload for remote sessions (so the switch can resend it through
+    /// the server); local sessions resend via `pending_turn` and ignore it.
+    fn arm_provider_failover_countdown(
+        &mut self,
+        prompt: &crate::provider::ProviderFailoverPrompt,
+        grace: Duration,
+    ) {
+        let resend = if self.is_remote {
+            self.rate_limit_pending_message
+                .as_ref()
+                .map(|pending| super::FallbackResendPayload {
+                    content: pending.content.clone(),
+                    images: pending.images.clone(),
+                    is_system: pending.is_system,
+                    auto_retry: pending.auto_retry,
+                    system_reminder: pending.system_reminder.clone(),
+                    raw_input: self.last_submitted_input.clone(),
+                })
+        } else {
+            None
+        };
+        self.pending_provider_failover = Some(super::PendingProviderFailover {
+            prompt: prompt.clone(),
+            deadline: Instant::now() + grace,
+            resend,
+        });
     }
 
     /// The model routes to consider when computing an error fallback, working in

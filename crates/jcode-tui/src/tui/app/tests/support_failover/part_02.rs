@@ -700,3 +700,133 @@ fn test_apply_fallback_offer_no_offer_is_noop() {
         assert!(!app.apply_pending_fallback_offer());
     });
 }
+
+/// Build a remote session whose model catalog exposes an OpenAI route, so a
+/// failover prompt targeting "openai" can be mapped to a concrete route.
+fn create_remote_failover_test_app() -> App {
+    let mut app = create_switchable_test_app("claude").0;
+    app.is_remote = true;
+    app.remote_provider_name = Some("Anthropic".to_string());
+    app.remote_provider_model = Some("claude-test".to_string());
+    app.remote_model_options = vec![
+        crate::provider::ModelRoute {
+            model: "claude-test".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "claude-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "gpt-test".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+    ];
+    app
+}
+
+/// A REMOTE session that hits cross-provider failover with countdown config
+/// must ARM the countdown (previously it fell to the `_` arm and wedged), and
+/// on deadline must STAGE a route selection + a resend payload for the server
+/// dispatcher rather than touching the (nonexistent) local provider.
+#[test]
+fn test_remote_failover_countdown_arms_and_stages_route_switch() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let mut app = create_remote_failover_test_app();
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "claude".to_string(),
+            from_label: "Anthropic".to_string(),
+            to_provider: "openai".to_string(),
+            to_label: "OpenAI".to_string(),
+            reason: "OAuth usage exhausted".to_string(),
+            estimated_input_chars: 32_000,
+            estimated_input_tokens: 8_000,
+        };
+
+        app.handle_provider_failover_prompt(prompt);
+        assert!(
+            app.pending_provider_failover.is_some(),
+            "remote countdown must arm, not wedge at the manual-only fallthrough"
+        );
+
+        if let Some(pending) = app.pending_provider_failover.as_mut() {
+            pending.deadline = Instant::now() - Duration::from_secs(1);
+        }
+        let progressed = app.maybe_progress_provider_failover_countdown();
+        assert!(progressed);
+        assert!(app.pending_provider_failover.is_none());
+        // Remote sessions never resend via pending_turn.
+        assert!(!app.pending_turn);
+        // The switch is staged for the server dispatcher, targeting the OpenAI route.
+        let selection = app
+            .pending_route_selection
+            .as_ref()
+            .expect("remote failover must stage a route selection");
+        assert_eq!(selection.model, "gpt-test");
+        assert_eq!(selection.api_method, "openai-oauth");
+    });
+}
+
+/// A REMOTE session configured for MANUAL failover has no human to run /model,
+/// so an unanswered prompt must NOT be terminal: it must fall back to a
+/// (longer-grace) countdown auto-switch instead of wedging forever.
+#[test]
+fn test_remote_manual_failover_times_out_into_switch() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let mut app = create_remote_failover_test_app();
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "claude".to_string(),
+            from_label: "Anthropic".to_string(),
+            to_provider: "openai".to_string(),
+            to_label: "OpenAI".to_string(),
+            reason: "OAuth usage exhausted".to_string(),
+            estimated_input_chars: 16_000,
+            estimated_input_tokens: 4_000,
+        };
+
+        app.handle_provider_failover_prompt(prompt);
+        assert!(
+            app.pending_provider_failover.is_some(),
+            "remote manual failover must arm a timeout countdown, not wedge"
+        );
+
+        if let Some(pending) = app.pending_provider_failover.as_mut() {
+            pending.deadline = Instant::now() - Duration::from_secs(1);
+        }
+        assert!(app.maybe_progress_provider_failover_countdown());
+        assert!(
+            app.pending_route_selection.is_some(),
+            "the timeout must carry out the switch"
+        );
+    });
+}
+
+/// A LOCAL manual session keeps its old behavior: no countdown, no auto-switch.
+#[test]
+fn test_local_manual_failover_does_not_arm_countdown() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let (mut app, _active) = create_switchable_test_app("claude");
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "claude".to_string(),
+            from_label: "Anthropic".to_string(),
+            to_provider: "openai".to_string(),
+            to_label: "OpenAI".to_string(),
+            reason: "OAuth usage exhausted".to_string(),
+            estimated_input_chars: 8_000,
+            estimated_input_tokens: 2_000,
+        };
+
+        app.handle_provider_failover_prompt(prompt);
+        assert!(
+            app.pending_provider_failover.is_none(),
+            "local manual mode must remain a manual prompt with no countdown"
+        );
+    });
+}

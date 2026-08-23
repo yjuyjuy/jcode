@@ -327,6 +327,10 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+    /// Remote sessions only: the failed turn's payload, captured when the
+    /// countdown is armed so the switch can resend it through the server once
+    /// the route change is confirmed. Local sessions resend via `pending_turn`.
+    resend: Option<FallbackResendPayload>,
 }
 
 /// An interactive "switch to the next best model/method and resend" offer shown
