@@ -488,8 +488,7 @@ impl Agent {
         }
         if let Some(prompt) = raw.strip_prefix("prompt:") {
             let prompt = prompt.trim();
-            return (!prompt.is_empty())
-                .then(|| PreCompactActionSpec::Prompt(prompt.to_string()));
+            return (!prompt.is_empty()).then(|| PreCompactActionSpec::Prompt(prompt.to_string()));
         }
         let name = if let Some(name) = raw.strip_prefix("skill:") {
             let name = name.trim();
@@ -570,9 +569,7 @@ impl Agent {
             .status()
             .await?;
         if !status.success() {
-            return Err(anyhow::anyhow!(
-                "pre-compact command exited with {status}"
-            ));
+            return Err(anyhow::anyhow!("pre-compact command exited with {status}"));
         }
         Ok(())
     }
@@ -605,7 +602,9 @@ impl Agent {
         loop {
             manager.check_and_apply_compaction_with(&messages);
             if manager.has_compaction_event() {
-                logging::info("[compaction] Blocking compaction applied before continuing the turn");
+                logging::info(
+                    "[compaction] Blocking compaction applied before continuing the turn",
+                );
                 return;
             }
             if !manager.is_compacting() {

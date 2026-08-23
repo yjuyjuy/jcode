@@ -136,7 +136,8 @@ fn compaction_env_keys_are_in_the_env_fingerprint() {
     crate::env::set_var("JCODE_PRE_COMPACT_ACTION", "stow");
     let keys = config_env_fingerprint();
     assert!(
-        keys.iter().any(|(key, _)| key == "JCODE_PRE_COMPACT_ACTION"),
+        keys.iter()
+            .any(|(key, _)| key == "JCODE_PRE_COMPACT_ACTION"),
         "a set JCODE_PRE_COMPACT_ACTION must appear in the env fingerprint"
     );
     restore_env_var("JCODE_PRE_COMPACT_ACTION", prev_action);

@@ -1934,11 +1934,13 @@ fn force_reactive_compaction(agent: &Agent) {
     }
 }
 
-
 /// Configure the pre-compact knobs through their env overrides for one test,
 /// so the real wiring (env -> config -> manager snapshot -> agent flow) is
 /// exercised. The caller restores env and invalidates the config cache.
-fn setup_pre_compact_env(action: &str, blocking: bool) -> (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
+fn setup_pre_compact_env(
+    action: &str,
+    blocking: bool,
+) -> (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
     let prev_action = std::env::var_os("JCODE_PRE_COMPACT_ACTION");
     let prev_blocking = std::env::var_os("JCODE_BLOCKING_COMPACT");
     crate::env::set_var("JCODE_PRE_COMPACT_ACTION", action);
@@ -2244,7 +2246,9 @@ async fn pre_compact_streaming_mode_streams_the_sub_turn_to_the_client() {
     let mut saw_sub_turn_text = false;
     while Instant::now() < deadline {
         match rx.recv().await {
-            Some(ServerEvent::TextDelta { text }) if text.contains("pre-compact sub-turn reply") => {
+            Some(ServerEvent::TextDelta { text })
+                if text.contains("pre-compact sub-turn reply") =>
+            {
                 saw_sub_turn_text = true;
                 break;
             }
