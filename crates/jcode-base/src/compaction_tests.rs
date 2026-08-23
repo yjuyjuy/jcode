@@ -1105,3 +1105,112 @@ fn test_recover_within_budget_summary_line_variants() {
     assert!(line.contains("shortened 5 large tool result(s)"));
     assert!(!line.contains("dropped"));
 }
+
+// ── Pre-compact action / blocking-compact mode ───────────────────────────
+
+#[test]
+fn test_pre_compact_config_snapshot_accessors() {
+    let default = CompactionManager::new();
+    assert_eq!(default.pre_compact_action(), None);
+    assert!(!default.blocking_compact());
+
+    let configured = CompactionManager::new()
+        .with_pre_compact_action(Some("stow".to_string()))
+        .with_blocking_compact(true);
+    assert_eq!(configured.pre_compact_action(), Some("stow"));
+    assert!(configured.blocking_compact());
+
+    // Whitespace-only counts as unconfigured (env-empty disables a config hook).
+    let blank = CompactionManager::new().with_pre_compact_action(Some("   ".to_string()));
+    assert_eq!(blank.pre_compact_action(), None);
+}
+
+#[test]
+fn test_pre_compact_in_progress_gates_soft_compaction() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..20 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} content {}", i, "z".repeat(60)),
+        ));
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(850);
+    // Pin the mode explicitly: the manager snapshots the GLOBAL config at
+    // construction, and the local test machine's config may select proactive
+    // mode, which would change what "due" means for these tests.
+    manager.set_mode(crate::config::CompactionMode::Reactive);
+
+    assert!(
+        manager.should_compact_with(&messages),
+        "soft compaction should be due at 85% with no pre-compact turn running"
+    );
+
+    manager.set_pre_compact_in_progress(true);
+    assert!(
+        !manager.should_compact_with(&messages),
+        "soft compaction must be suspended while the pre-compact action runs"
+    );
+
+    manager.set_pre_compact_in_progress(false);
+    assert!(
+        manager.should_compact_with(&messages),
+        "soft compaction must resume once the pre-compact action finishes"
+    );
+}
+
+#[test]
+fn test_emergency_hard_compact_ignores_pre_compact_in_progress() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..20 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("message {} with padding {}", i, "x".repeat(50)),
+        ));
+        manager.notify_message_added();
+    }
+    // 96% usage - above the critical threshold while a pre-compact action runs.
+    manager.update_observed_input_tokens(960);
+    manager.set_pre_compact_in_progress(true);
+
+    let action = manager.ensure_context_fits(&messages, Arc::new(MockSummaryProvider));
+    assert!(
+        matches!(action, CompactionAction::HardCompacted(_)),
+        "emergency hard compact must ignore the pre-compact in-progress flag"
+    );
+    assert!(
+        manager.compacted_count > 0,
+        "compacted_count should increase after the emergency hard compact"
+    );
+}
+
+#[tokio::test]
+async fn test_background_compaction_does_not_start_while_pre_compact_action_runs() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..20 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} content {}", i, "z".repeat(60)),
+        ));
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(850);
+    manager.set_mode(crate::config::CompactionMode::Reactive);
+
+    manager.set_pre_compact_in_progress(true);
+    manager.maybe_start_compaction_with(&messages, Arc::new(MockSummaryProvider));
+    assert!(
+        !manager.is_compacting(),
+        "compaction must not start while the pre-compact action runs - action first, then compact"
+    );
+
+    manager.set_pre_compact_in_progress(false);
+    manager.maybe_start_compaction_with(&messages, Arc::new(MockSummaryProvider));
+    assert!(
+        manager.is_compacting(),
+        "compaction must start once the pre-compact action finishes"
+    );
+}

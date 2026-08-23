@@ -468,6 +468,22 @@ impl Config {
             }
         }
 
+        // Compaction
+        if let Ok(v) = std::env::var("JCODE_PRE_COMPACT_ACTION") {
+            let trimmed = v.trim();
+            // An explicitly empty env value disables a config-file pre-compact action.
+            self.compaction.pre_compact_action = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_BLOCKING_COMPACT")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.compaction.blocking_compact = parsed;
+        }
+
         // Web search
         if let Ok(v) = std::env::var("JCODE_WEBSEARCH_ENGINE")
             && let Some(engine) = WebSearchEngine::parse(&v)

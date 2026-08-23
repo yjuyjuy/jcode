@@ -60,6 +60,90 @@ fn mermaid_feature_defaults_on_and_parses_false() {
 }
 
 #[test]
+fn compaction_pre_compact_knobs_default_off_and_parse() {
+    let defaults = Config::default();
+    assert!(
+        defaults.compaction.pre_compact_action.is_none(),
+        "pre_compact_action must default to None (today's behavior)"
+    );
+    assert!(
+        !defaults.compaction.blocking_compact,
+        "blocking_compact must default to false (today's behavior)"
+    );
+
+    let cfg: Config = toml::from_str(
+        "[compaction]\npre_compact_action = \"skill:stow\"\nblocking_compact = true\n",
+    )
+    .expect("compaction section with pre-compact knobs should parse");
+    assert_eq!(
+        cfg.compaction.pre_compact_action.as_deref(),
+        Some("skill:stow")
+    );
+    assert!(cfg.compaction.blocking_compact);
+
+    // A config file that predates the knobs must keep parsing with defaults.
+    let old: Config = toml::from_str("[compaction]\nlookahead_turns = 20\n")
+        .expect("a compaction section without the new knobs should parse");
+    assert!(old.compaction.pre_compact_action.is_none());
+    assert!(!old.compaction.blocking_compact);
+}
+
+#[test]
+fn compaction_pre_compact_env_overrides() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_action = std::env::var_os("JCODE_PRE_COMPACT_ACTION");
+    let prev_blocking = std::env::var_os("JCODE_BLOCKING_COMPACT");
+    crate::env::set_var("JCODE_PRE_COMPACT_ACTION", "stow");
+    crate::env::set_var("JCODE_BLOCKING_COMPACT", "on");
+
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.compaction.pre_compact_action.as_deref(), Some("stow"));
+    assert!(cfg.compaction.blocking_compact);
+
+    restore_env_var("JCODE_PRE_COMPACT_ACTION", prev_action);
+    restore_env_var("JCODE_BLOCKING_COMPACT", prev_blocking);
+
+    // An explicitly empty env value disables a config-file pre-compact action.
+    let prev_action = std::env::var_os("JCODE_PRE_COMPACT_ACTION");
+    crate::env::set_var("JCODE_PRE_COMPACT_ACTION", "");
+    let mut cfg = Config::default();
+    cfg.compaction.pre_compact_action = Some("stow".to_string());
+    cfg.apply_env_overrides();
+    assert!(
+        cfg.compaction.pre_compact_action.is_none(),
+        "empty JCODE_PRE_COMPACT_ACTION must disable the config-file action"
+    );
+    restore_env_var("JCODE_PRE_COMPACT_ACTION", prev_action);
+}
+
+#[test]
+fn compaction_env_keys_are_in_the_env_fingerprint() {
+    // The static key list must cover both knobs so a config-file or env change
+    // to them triggers a reload.
+    assert!(
+        super::CONFIG_ENV_KEYS.contains(&"JCODE_PRE_COMPACT_ACTION"),
+        "JCODE_PRE_COMPACT_ACTION must be in the env fingerprint so config reloads"
+    );
+    assert!(
+        super::CONFIG_ENV_KEYS.contains(&"JCODE_BLOCKING_COMPACT"),
+        "JCODE_BLOCKING_COMPACT must be in the env fingerprint so config reloads"
+    );
+
+    // End-to-end: a set key shows up in the fingerprint read.
+    let _guard = crate::storage::lock_test_env();
+    let prev_action = std::env::var_os("JCODE_PRE_COMPACT_ACTION");
+    crate::env::set_var("JCODE_PRE_COMPACT_ACTION", "stow");
+    let keys = config_env_fingerprint();
+    assert!(
+        keys.iter()
+            .any(|(key, _)| key == "JCODE_PRE_COMPACT_ACTION"),
+        "a set JCODE_PRE_COMPACT_ACTION must appear in the env fingerprint"
+    );
+    restore_env_var("JCODE_PRE_COMPACT_ACTION", prev_action);
+}
+
+#[test]
 fn mermaid_environment_override_uses_standard_boolean_values() {
     let _guard = crate::storage::lock_test_env();
     let previous = std::env::var_os("JCODE_ENABLE_MERMAID");
