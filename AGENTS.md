@@ -71,6 +71,17 @@ adopted on the session's next turn and never interrupts a running turn; when a
 turn holds the agent lock, the switch is deferred and applied on drain. The
 end-to-end smoke test is `scripts/asw_session_control_e2e.sh`.
 
+## Pre-compact flow
+
+`[compaction] pre_compact_action` and `blocking_compact` (both opt-in) live in
+`crates/jcode-app-core/src/agent/compaction.rs`
+(`run_pre_compact_flow_if_due`, called from both turn loops); the knobs are
+snapshotted from the global config when the `CompactionManager` is constructed
+in `crates/jcode-base/src/compaction.rs`. The emergency hard-compact path
+(critical threshold, context-limit recovery) deliberately ignores both knobs.
+Forms and behavior are documented in `docs/COMPACTION.md` and the config
+template in `crates/jcode-base/src/config/default_file.rs`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
