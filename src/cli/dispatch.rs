@@ -402,6 +402,22 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 )
                 .await?;
             }
+            SessionCommand::SetModel {
+                model,
+                effort,
+                session,
+                socket,
+                json,
+            } => {
+                commands::run_session_set_model_command(
+                    &model,
+                    effort.as_deref(),
+                    session,
+                    socket,
+                    json,
+                )
+                .await?;
+            }
         },
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;

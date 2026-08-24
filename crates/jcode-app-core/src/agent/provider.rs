@@ -1,5 +1,19 @@
 use super::*;
 
+/// The resolved, persisted `{model, provider, effort}` after a combined
+/// model+effort set. This is the *applied* state (what the session will use for
+/// its next turn), which is what a caller must verify against - not the raw
+/// request, since effort legitimately clamps to what the model supports (e.g.
+/// `max` -> `xhigh`) and a route prefix is consumed into the provider. Serialized
+/// straight onto the debug `set_model` response so a non-interactive caller can
+/// read the outcome back without a second round-trip.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppliedModelEffort {
+    pub model: String,
+    pub provider: String,
+    pub effort: Option<String>,
+}
+
 impl Agent {
     pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
         self.provider.set_premium_mode(mode);
@@ -205,6 +219,66 @@ impl Agent {
         self.log_env_snapshot("set_reasoning_effort");
         self.session.save()?;
         Ok(current)
+    }
+
+    /// The reasoning effort the active provider will use for the next request,
+    /// or `None` when no effort is configured (or the provider has no notion of
+    /// effort). This mirrors `session.reasoning_effort` after any successful
+    /// `set_reasoning_effort`, so it is readback-verifiable.
+    pub fn reasoning_effort(&self) -> Option<String> {
+        self.provider.reasoning_effort()
+    }
+
+    /// Atomically set this session's model and (optionally) its reasoning
+    /// effort, persisting both to the session store, and return the resulting
+    /// applied state `{model, provider, effort}` for readback verification.
+    ///
+    /// The model is applied first because a provider's set of valid efforts
+    /// depends on the target model (e.g. Anthropic re-clamps a stored effort for
+    /// the new model, and `xhigh`/`max` are model-gated). If the effort is then
+    /// rejected, the model change is rolled back so the operation is all-or-
+    /// nothing: a caller never lands in the partial-apply state (new model, old
+    /// or wrong effort) that silently drifts a fleet worker. A bad model or a
+    /// bad effort surfaces as an `Err` here rather than a silent no-op.
+    pub fn set_model_and_effort(
+        &mut self,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<AppliedModelEffort> {
+        let prev_model = self.provider_model();
+        let prev_effort = self.reasoning_effort();
+
+        // Applying the model may cross providers and fail loudly for an unknown
+        // model; nothing is persisted in that case.
+        self.set_model(model)?;
+
+        if let Some(effort) = effort
+            && let Err(err) = self.set_reasoning_effort(effort)
+        {
+            // Roll the model back to the pre-call state so the session is not
+            // left on the new model with a stale/wrong effort. Restoration is
+            // best-effort: the original model was valid a moment ago, so this
+            // normally succeeds; if it cannot, we still surface the original
+            // effort error rather than masking it.
+            let _ = self.set_model(&prev_model);
+            match &prev_effort {
+                Some(prev) => {
+                    let _ = self.set_reasoning_effort(prev);
+                }
+                // No effort was configured before: clear back to the
+                // provider default (`default` normalizes to "no effort").
+                None => {
+                    let _ = self.set_reasoning_effort("default");
+                }
+            }
+            return Err(err);
+        }
+
+        Ok(AppliedModelEffort {
+            model: self.provider_model(),
+            provider: self.provider_name(),
+            effort: self.reasoning_effort(),
+        })
     }
 
     pub fn subagent_model(&self) -> Option<String> {

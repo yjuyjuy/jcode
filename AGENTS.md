@@ -71,6 +71,26 @@ adopted on the session's next turn and never interrupts a running turn; when a
 turn holds the agent lock, the switch is deferred and applied on drain. The
 end-to-end smoke test is `scripts/asw_session_control_e2e.sh`.
 
+## Non-interactive model + reasoning-effort set
+
+To change a running session's model (and optionally its reasoning effort) from
+automation, use `jcode session set-model <model> [--effort <e>] [--session <sid>]`
+(`run_session_set_model_command` in `src/cli/commands.rs`), not by typing
+`/model` into the TUI composer. Typing a slash command races the autocomplete
+popup and can silently no-op, which is what drifted fleet workers onto the wrong
+model. The verb applies model and effort together and then verifies by reading
+the session state back, exiting non-zero on any mismatch or bad input.
+
+It rides the debug socket, which is opt-in via `[display] debug_socket = true` in
+`~/.jcode/config.toml`. The transport is the shared `send_debug_command` helper in
+`src/cli/debug.rs`. Server side, the effort-aware `set_model:` verb accepts a JSON
+payload `{"model":..,"effort":..}` (a JSON payload because model specs contain `:`
+and `@`, so no delimiter is safe) and calls `Agent::set_model_and_effort`
+(`crates/jcode-app-core/src/agent/provider.rs`), which sets model first then effort
+(Anthropic re-clamps stored effort for the new model) and rolls the model back if
+the effort is rejected. The debug `state` verb reports `effort` alongside `model`
+for readback (`crates/jcode-app-core/src/server/debug_command_exec.rs`).
+
 ## Pre-compact flow
 
 `[compaction] pre_compact_action` and `blocking_compact` (both opt-in) live in

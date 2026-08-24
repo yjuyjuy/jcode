@@ -224,6 +224,60 @@ fn session_rename_subcommand_parses() {
 }
 
 #[test]
+fn session_set_model_subcommand_parses() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "session",
+        "set-model",
+        "claude-api:claude-fable-5",
+        "--effort",
+        "high",
+        "--session",
+        "fox",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Session(SessionCommand::SetModel {
+            model,
+            effort,
+            session,
+            socket,
+            json,
+        })) => {
+            assert_eq!(model, "claude-api:claude-fable-5");
+            assert_eq!(effort.as_deref(), Some("high"));
+            assert_eq!(session.as_deref(), Some("fox"));
+            assert!(socket.is_none());
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    // Model is required; effort/session/socket/json are optional.
+    let args = Args::try_parse_from(["jcode", "session", "set-model", "deepseek-v4-flash"]).unwrap();
+    match args.command {
+        Some(Command::Session(SessionCommand::SetModel {
+            model,
+            effort,
+            session,
+            socket,
+            json,
+        })) => {
+            assert_eq!(model, "deepseek-v4-flash");
+            assert!(effort.is_none());
+            assert!(session.is_none());
+            assert!(socket.is_none());
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    // Missing the required model argument must be a parse error, not a default.
+    assert!(Args::try_parse_from(["jcode", "session", "set-model"]).is_err());
+}
+
+#[test]
 fn cloud_sessions_subcommands_parse() {
     let args = Args::try_parse_from([
         "jcode",
