@@ -2365,8 +2365,7 @@ async fn set_model_and_effort_persists_both_and_is_readback_verifiable() {
     assert_eq!(agent.reasoning_effort().as_deref(), Some("high"));
 
     // Both survive to the session store, so a fresh readback confirms them.
-    let persisted =
-        crate::session::Session::load(agent.session_id()).expect("load saved session");
+    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
     assert_eq!(persisted.model.as_deref(), Some("model-b"));
     assert_eq!(persisted.reasoning_effort.as_deref(), Some("high"));
 }
@@ -2443,8 +2442,7 @@ async fn set_model_and_effort_bad_effort_rolls_back_model() {
     // original, so the session never lands on the new model with a wrong effort.
     assert_eq!(agent.provider_model(), "model-a");
     assert_eq!(agent.reasoning_effort().as_deref(), Some("low"));
-    let persisted =
-        crate::session::Session::load(agent.session_id()).expect("load saved session");
+    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
     assert_eq!(persisted.model.as_deref(), Some("model-a"));
     assert_eq!(persisted.reasoning_effort.as_deref(), Some("low"));
 }

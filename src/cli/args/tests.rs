@@ -255,7 +255,8 @@ fn session_set_model_subcommand_parses() {
     }
 
     // Model is required; effort/session/socket/json are optional.
-    let args = Args::try_parse_from(["jcode", "session", "set-model", "deepseek-v4-flash"]).unwrap();
+    let args =
+        Args::try_parse_from(["jcode", "session", "set-model", "deepseek-v4-flash"]).unwrap();
     match args.command {
         Some(Command::Session(SessionCommand::SetModel {
             model,

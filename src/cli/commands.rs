@@ -1668,8 +1668,7 @@ fn request_model_matches(requested: &str, applied: &str) -> bool {
         // Drop a trailing "@pin" provider suffix.
         after_route.split('@').next().unwrap_or(after_route)
     }
-    requested.eq_ignore_ascii_case(applied)
-        || bare(requested).eq_ignore_ascii_case(bare(applied))
+    requested.eq_ignore_ascii_case(applied) || bare(requested).eq_ignore_ascii_case(bare(applied))
 }
 
 /// Machine-readable result of `jcode session set-model`.
@@ -1721,8 +1720,7 @@ pub async fn run_session_set_model_command(
     // session store has not persisted). Omitting the session lets the server
     // target its single active session and error if more than one is live.
     let target: Option<String> = session.as_deref().map(|session_ref| {
-        session::find_session_by_name_or_id(session_ref)
-            .unwrap_or_else(|_| session_ref.to_string())
+        session::find_session_by_name_or_id(session_ref).unwrap_or_else(|_| session_ref.to_string())
     });
 
     // Build the effort-aware `set_model:` JSON payload. A JSON payload is used
@@ -1739,7 +1737,14 @@ pub async fn run_session_set_model_command(
     let set_reply =
         super::debug::send_debug_command(&set_cmd, target.as_deref(), socket.as_deref()).await?;
     if !set_reply.ok {
-        report_set_model_failure(json, target.as_deref(), model, effort, None, &set_reply.output)?;
+        report_set_model_failure(
+            json,
+            target.as_deref(),
+            model,
+            effort,
+            None,
+            &set_reply.output,
+        )?;
         anyhow::bail!("set-model failed: {}", set_reply.output);
     }
     let applied: serde_json::Value = serde_json::from_str(&set_reply.output).map_err(|e| {
@@ -1794,7 +1799,10 @@ pub async fn run_session_set_model_command(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let state_effort = state.get("effort").and_then(|v| v.as_str()).map(str::to_string);
+    let state_effort = state
+        .get("effort")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     // Step 3: verify. Collect every discrepancy so the message names all of them.
     let mut problems: Vec<String> = Vec::new();

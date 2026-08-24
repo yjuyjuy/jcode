@@ -143,7 +143,9 @@ fn parse_set_model_arg(arg: &str) -> Result<(String, Option<String>)> {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("set_model: JSON payload requires a non-empty \"model\""))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("set_model: JSON payload requires a non-empty \"model\"")
+            })?
             .to_string();
         // Absent effort => leave effort unchanged. An explicitly empty effort
         // string is treated the same as absent (no-op) rather than an error.

@@ -126,7 +126,8 @@ pub async fn run_debug_command(
         format!("{}:{}", command, arg)
     };
 
-    let reply = send_debug_command(&debug_cmd, session_id.as_deref(), socket_path.as_deref()).await?;
+    let reply =
+        send_debug_command(&debug_cmd, session_id.as_deref(), socket_path.as_deref()).await?;
     if reply.ok {
         println!("{}", reply.output);
     } else {
