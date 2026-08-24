@@ -93,21 +93,29 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 /// * `probe_override` is the parsed value of `JCODE_MERMAID_PICKER_PROBE`
 ///   (`Some(true)`/`Some(false)` when set explicitly, `None` otherwise) and
 ///   always wins so users can force either behavior.
-/// * When the override is absent, startup stays on the environment-based fast
-///   path. The upstream stdio probe can block for two seconds when a terminal
-///   does not answer, which made an optional image capability dominate the TUI
-///   critical path. Users behind multiplexers that hide the outer terminal can
-///   still opt into the authoritative probe with
-///   `JCODE_MERMAID_PICKER_PROBE=1`.
+/// * Absent an override, probe under every masking multiplexer
+///   (`Multiplexer::Herdr | Tmux | Screen | Zellij`). These multiplexers mask
+///   the outer terminal identity, so the env protocol value cannot be trusted
+///   and only the authoritative stdio probe learns the real protocol.
+/// * Absent an override and `Multiplexer::None`, keep the historical fast path.
+///   The upstream stdio probe can block for two seconds when a terminal does
+///   not answer, so an unmasked terminal stays off the critical path and uses
+///   its env-based protocol.
 pub(super) fn decide_picker_init_mode(
     probe_override: Option<bool>,
     _env_protocol: Option<ProtocolType>,
-    _multiplexer: Multiplexer,
+    multiplexer: Multiplexer,
 ) -> PickerInitMode {
-    if probe_override == Some(true) {
-        PickerInitMode::Probe
-    } else {
-        PickerInitMode::Fast
+    match probe_override {
+        Some(true) => PickerInitMode::Probe,
+        Some(false) => PickerInitMode::Fast,
+        None => match multiplexer {
+            Multiplexer::Herdr
+            | Multiplexer::Tmux
+            | Multiplexer::Screen
+            | Multiplexer::Zellij => PickerInitMode::Probe,
+            Multiplexer::None => PickerInitMode::Fast,
+        },
     }
 }
 
@@ -827,18 +835,30 @@ mod tests {
     }
 
     #[test]
-    fn decide_mode_defaults_to_fast_path() {
+    fn decide_mode_probes_inside_masking_multiplexers() {
         // Env already identified a graphics terminal: stay fast.
         assert_eq!(
             decide_picker_init_mode(None, Some(ProtocolType::Kitty), Multiplexer::None),
             PickerInitMode::Fast
         );
-        // An env miss must not turn an optional capability query into a
-        // two-second startup stall. Multiplexer users can opt in explicitly.
+        // Masking multiplexers hide the outer terminal, so probe by default.
         assert_eq!(
             decide_picker_init_mode(None, None, Multiplexer::Herdr),
-            PickerInitMode::Fast
+            PickerInitMode::Probe
         );
+        assert_eq!(
+            decide_picker_init_mode(None, None, Multiplexer::Tmux),
+            PickerInitMode::Probe
+        );
+        assert_eq!(
+            decide_picker_init_mode(None, None, Multiplexer::Screen),
+            PickerInitMode::Probe
+        );
+        assert_eq!(
+            decide_picker_init_mode(None, None, Multiplexer::Zellij),
+            PickerInitMode::Probe
+        );
+        // No multiplexer keeps the historical fast path.
         assert_eq!(
             decide_picker_init_mode(None, None, Multiplexer::None),
             PickerInitMode::Fast
