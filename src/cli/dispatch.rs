@@ -7,8 +7,7 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
-    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
-    TranscriptModeArg,
+    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -376,49 +375,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Memory(subcmd)) => {
             commands::run_memory_command(map_memory_subcommand(subcmd))?;
         }
-        Some(Command::Session(subcmd)) => match subcmd {
-            SessionCommand::Rename {
-                session,
-                name,
-                clear,
-                json,
-            } => commands::run_session_rename_command(&session, name.as_deref(), clear, json)?,
-            SessionCommand::List { json } => {
-                commands::run_session_list_command(json).await?;
-            }
-            SessionCommand::SwitchAccount {
-                session,
-                all,
-                account,
-                model,
-                json,
-            } => {
-                commands::run_session_switch_account_command(
-                    session,
-                    all,
-                    &account,
-                    model.as_deref(),
-                    json,
-                )
-                .await?;
-            }
-            SessionCommand::SetModel {
-                model,
-                effort,
-                session,
-                socket,
-                json,
-            } => {
-                commands::run_session_set_model_command(
-                    &model,
-                    effort.as_deref(),
-                    session,
-                    socket,
-                    json,
-                )
-                .await?;
-            }
-        },
+        Some(Command::Session(subcmd)) => {
+            commands::run_session_command(subcmd).await?;
+        }
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }
