@@ -258,18 +258,22 @@ impl Agent {
             // Roll the model back to the pre-call state so the session is not
             // left on the new model with a stale/wrong effort. Restoration is
             // best-effort: the original model was valid a moment ago, so this
-            // normally succeeds; if it cannot, we still surface the original
-            // effort error rather than masking it.
-            let _ = self.set_model(&prev_model);
-            match &prev_effort {
-                Some(prev) => {
-                    let _ = self.set_reasoning_effort(prev);
-                }
-                // No effort was configured before: clear back to the
-                // provider default (`default` normalizes to "no effort").
-                None => {
-                    let _ = self.set_reasoning_effort("default");
-                }
+            // normally succeeds; if it cannot, log it but still surface the
+            // original effort error rather than masking it.
+            if let Err(rollback_err) = self.set_model(&prev_model) {
+                crate::logging::error(&format!(
+                    "Failed to roll back model to '{}' after effort '{}' was rejected: {}",
+                    prev_model, effort, rollback_err
+                ));
+            }
+            // Restore the prior effort (or clear to the provider default when
+            // none was configured; `default` normalizes to "no effort").
+            let restore = prev_effort.as_deref().unwrap_or("default");
+            if let Err(restore_err) = self.set_reasoning_effort(restore) {
+                crate::logging::error(&format!(
+                    "Failed to restore reasoning effort '{}' after rollback: {}",
+                    restore, restore_err
+                ));
             }
             return Err(err);
         }

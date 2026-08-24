@@ -212,12 +212,12 @@ pub(crate) async fn run_session_switch_account_command(
                 .model
                 .as_deref()
                 .map(|m| format!(" model={m}"))
-                .unwrap_or_default();
+                .unwrap_or_else(String::new);
             let error = outcome
                 .error
                 .as_deref()
                 .map(|e| format!(" - {e}"))
-                .unwrap_or_default();
+                .unwrap_or_else(String::new);
             println!(
                 "{}: {} account={}{}{}",
                 outcome.session_id, status, account, model_note, error
@@ -343,12 +343,12 @@ pub(crate) async fn run_session_set_model_command(
     let applied_model = applied
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or_default()
+        .unwrap_or("")
         .to_string();
     let applied_provider = applied
         .get("provider")
         .and_then(|v| v.as_str())
-        .unwrap_or_default()
+        .unwrap_or("")
         .to_string();
     let applied_effort = applied
         .get("effort")
@@ -385,7 +385,7 @@ pub(crate) async fn run_session_set_model_command(
     let state_model = state
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or_default()
+        .unwrap_or("")
         .to_string();
     let state_effort = state
         .get("effort")
@@ -415,7 +415,7 @@ pub(crate) async fn run_session_set_model_command(
     if effort.is_some() && state_effort.is_none() {
         problems.push(format!(
             "requested effort '{}' but session reports no effort set",
-            effort.unwrap_or_default()
+            effort.unwrap_or("")
         ));
     }
 
