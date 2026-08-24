@@ -861,12 +861,36 @@ fn gpu_summary() -> Option<String> {
     }
 }
 
+/// Whether the `JCODE_NO_AGENTS_MD` environment variable suppresses AGENTS.md loading.
+///
+/// Parsed like `env_flag_enabled` in `crate::session`, with `0`, `false`, `off`,
+/// and `no` (case-insensitive) as well as an empty value disabling the knob.
+fn no_agents_md_enabled() -> bool {
+    std::env::var("JCODE_NO_AGENTS_MD")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && trimmed != "0"
+                && !trimmed.eq_ignore_ascii_case("false")
+                && !trimmed.eq_ignore_ascii_case("off")
+                && !trimmed.eq_ignore_ascii_case("no")
+        })
+        .unwrap_or(false)
+}
+
 fn load_agents_md_files_from_dirs(
     project_dir: &Path,
     global_agents_md: Option<&Path>,
 ) -> (Option<String>, ContextInfo) {
     let mut contents = vec![];
     let mut info = ContextInfo::default();
+
+    // JCODE_NO_AGENTS_MD suppresses both the project ./AGENTS.md and the global
+    // ~/AGENTS.md, before any path.exists() checks, so the files are never read.
+    // ContextInfo stays honest: has_project_agents_md / has_global_agents_md are false.
+    if no_agents_md_enabled() {
+        return (None, info);
+    }
 
     // Helper to load a file if it exists, returns (formatted_content, raw_size)
     let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
