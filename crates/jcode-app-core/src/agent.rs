@@ -1055,3 +1055,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_model_effort_tests.rs"]
+mod model_effort_tests;
