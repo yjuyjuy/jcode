@@ -134,10 +134,11 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
         return false;
     };
     match family {
-        // Opus/Sonnet 3.x-4.8 and Sonnet 5 were probed with raw long-context
-        // requests on a live subscription.
+        // Opus/Sonnet 3.x-4.8, Sonnet 5, and Fable 5 were probed with raw
+        // long-context requests on a live subscription.
         Some("opus") => version <= (4, 8),
         Some("sonnet") => version <= (5, 0),
+        Some("fable") => version <= (5, 0),
         Some("haiku") => version <= (4, 5),
         _ => false,
     }
