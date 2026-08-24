@@ -35,25 +35,51 @@ pub enum ImageProtocol {
 impl ImageProtocol {
     /// Detect the best available image protocol for the current terminal
     pub fn detect() -> Self {
+        Self::detect_with_env(
+            std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
+            std::env::var("TERM").ok().as_deref(),
+            std::env::var("TERM_PROGRAM").ok().as_deref(),
+            std::env::var("LC_TERMINAL").ok().as_deref(),
+            Self::detect_sixel(),
+            iterm2_images_enabled(),
+            masking_multiplexer_from_env(),
+            picker_probe_override_from_env(),
+        )
+    }
+
+    /// Pure detection core. Takes every environment signal as an argument so it
+    /// is testable without mutating process env, and so the masking-multiplexer
+    /// fallback can be exercised deterministically.
+    #[allow(clippy::too_many_arguments)]
+    fn detect_with_env(
+        kitty_window_id: Option<&str>,
+        term: Option<&str>,
+        term_program: Option<&str>,
+        lc_terminal: Option<&str>,
+        sixel_capable: bool,
+        iterm2_enabled: bool,
+        masking_multiplexer: bool,
+        probe_override: Option<bool>,
+    ) -> Self {
         // Check for Kitty first (most capable)
-        if std::env::var("KITTY_WINDOW_ID").is_ok() {
+        if kitty_window_id.is_some() {
             return Self::Kitty;
         }
 
         // Check TERM for Kitty-compatible terminals.
-        if let Ok(term) = std::env::var("TERM")
-            && is_kitty_terminal_name(&term)
+        if let Some(term) = term
+            && is_kitty_terminal_name(term)
         {
             return Self::Kitty;
         }
 
         // Check TERM_PROGRAM for Kitty-compatible terminals.
-        if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
-            if is_kitty_terminal_name(&term_program) {
+        if let Some(term_program) = term_program {
+            if is_kitty_terminal_name(term_program) {
                 return Self::Kitty;
             }
             if term_program == "iTerm.app" {
-                return iterm2_protocol();
+                return iterm2_protocol(iterm2_enabled);
             }
             // WezTerm supports Sixel
             if term_program == "WezTerm" {
@@ -62,15 +88,24 @@ impl ImageProtocol {
         }
 
         // Check LC_TERMINAL for iTerm2
-        if let Ok(lc_terminal) = std::env::var("LC_TERMINAL")
-            && lc_terminal == "iTerm2"
-        {
-            return iterm2_protocol();
+        if lc_terminal == Some("iTerm2") {
+            return iterm2_protocol(iterm2_enabled);
         }
 
         // Check for Sixel-capable terminals
-        if Self::detect_sixel() {
+        if sixel_capable {
             return Self::Sixel;
+        }
+
+        // No env signal. A masking multiplexer (herdr, tmux, screen, zellij)
+        // rewrites TERM to a bland value and unsets the rest, so the checks
+        // above all miss even when the outer terminal paints Kitty graphics.
+        // Mirror the mermaid picker's herdr->Ghostty reality and assume Kitty,
+        // rather than returning None and silently painting nothing. The
+        // `JCODE_MERMAID_PICKER_PROBE` override stays authoritative so a
+        // genuinely non-graphics environment can force this off with `=0`.
+        if masking_multiplexer && probe_override != Some(false) {
+            return Self::Kitty;
         }
 
         Self::None
@@ -130,6 +165,53 @@ fn in_tmux() -> bool {
         || std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux"))
 }
 
+/// Detect whether jcode runs inside a multiplexer that MASKS the outer terminal
+/// by rewriting TERM and unsetting the terminal-identifying env vars. Mirrors
+/// `detect_multiplexer` in jcode-tui-mermaid using the same signals (herdr via
+/// `HERDR_ENV`, tmux via `TMUX` or `TERM` prefix, screen via `STY` or `TERM`
+/// prefix, zellij via `ZELLIJ`). Re-expressed locally to avoid a cross-crate
+/// dependency; these are just env reads.
+fn masking_multiplexer_from_env() -> bool {
+    masking_multiplexer(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("TMUX").ok().as_deref(),
+        std::env::var("STY").ok().as_deref(),
+        std::env::var("ZELLIJ").ok().as_deref(),
+        std::env::var("HERDR_ENV").ok().as_deref(),
+    )
+}
+
+fn masking_multiplexer(
+    term: Option<&str>,
+    tmux: Option<&str>,
+    sty: Option<&str>,
+    zellij: Option<&str>,
+    herdr_env: Option<&str>,
+) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+    let term = term.unwrap_or("");
+    set(herdr_env)
+        || set(zellij)
+        || set(tmux)
+        || set(sty)
+        || term.starts_with("screen")
+        || term.starts_with("tmux")
+}
+
+/// Parse the `JCODE_MERMAID_PICKER_PROBE` override, the same seam the mermaid
+/// picker honors. `Some(true)`/`Some(false)` when explicitly set, else `None`.
+fn picker_probe_override_from_env() -> Option<bool> {
+    parse_env_bool(std::env::var("JCODE_MERMAID_PICKER_PROBE").ok().as_deref()?)
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// iTerm2's inline-image protocol corrupts jcode's TUI output in real iTerm2,
 /// so image display is disabled there unless the user opts back in with
 /// `JCODE_ITERM2_IMAGES=1`.
@@ -144,8 +226,8 @@ fn iterm2_images_enabled() -> bool {
     )
 }
 
-fn iterm2_protocol() -> ImageProtocol {
-    if iterm2_images_enabled() {
+fn iterm2_protocol(enabled: bool) -> ImageProtocol {
+    if enabled {
         ImageProtocol::ITerm2
     } else {
         ImageProtocol::None
@@ -534,7 +616,7 @@ mod tests {
     fn iterm2_images_are_disabled_unless_opted_in() {
         // Default (no opt-in env var in test process): iTerm2 is treated as
         // having no usable image protocol.
-        assert_eq!(iterm2_protocol(), ImageProtocol::None);
+        assert_eq!(iterm2_protocol(iterm2_images_enabled()), ImageProtocol::None);
         assert!(!iterm2_images_enabled());
     }
 
@@ -542,6 +624,155 @@ mod tests {
     fn handterm_uses_kitty_graphics_protocol() {
         assert!(is_kitty_terminal_name("handterm"));
         assert!(is_kitty_terminal_name("HandTerm"));
+    }
+
+    #[test]
+    fn masked_multiplexer_with_no_env_resolves_kitty() {
+        // herdr masks TERM to a bland value and unsets terminal identity, so
+        // every env signal misses. Without multiplexer awareness detect()
+        // would return None and paint nothing.
+        let herdr = ImageProtocol::detect_with_env(
+            None,
+            Some("xterm-256color"),
+            None,
+            None,
+            false,
+            false,
+            masking_multiplexer(
+                Some("xterm-256color"),
+                None,
+                None,
+                None,
+                Some("1"),
+            ),
+            None,
+        );
+        assert_eq!(herdr, ImageProtocol::Kitty);
+        assert!(herdr.is_supported());
+    }
+
+    #[test]
+    fn probe_override_off_disables_masked_multiplexer_fallback() {
+        // JCODE_MERMAID_PICKER_PROBE=0 forces the non-graphics path even under
+        // a masking multiplexer.
+        let forced_off = ImageProtocol::detect_with_env(
+            None,
+            Some("xterm-256color"),
+            None,
+            None,
+            false,
+            false,
+            true,
+            Some(false),
+        );
+        assert_eq!(forced_off, ImageProtocol::None);
+    }
+
+    #[test]
+    fn unmasked_terminal_with_no_env_stays_none() {
+        let bare = ImageProtocol::detect_with_env(
+            None, None, None, None, false, false, false, None,
+        );
+        assert_eq!(bare, ImageProtocol::None);
+    }
+
+    #[test]
+    fn real_terminal_cases_are_unchanged_under_masking() {
+        // Kitty via KITTY_WINDOW_ID wins even inside a multiplexer.
+        assert_eq!(
+            ImageProtocol::detect_with_env(
+                Some("1"),
+                Some("xterm-256color"),
+                None,
+                None,
+                false,
+                false,
+                true,
+                None,
+            ),
+            ImageProtocol::Kitty,
+        );
+        // Ghostty via TERM.
+        assert_eq!(
+            ImageProtocol::detect_with_env(
+                None,
+                Some("xterm-ghostty"),
+                None,
+                None,
+                false,
+                false,
+                false,
+                None,
+            ),
+            ImageProtocol::Kitty,
+        );
+        // WezTerm -> Sixel.
+        assert_eq!(
+            ImageProtocol::detect_with_env(
+                None,
+                None,
+                Some("WezTerm"),
+                None,
+                false,
+                false,
+                false,
+                None,
+            ),
+            ImageProtocol::Sixel,
+        );
+        // Real iTerm2 stays opt-in gated.
+        assert_eq!(
+            ImageProtocol::detect_with_env(
+                None,
+                None,
+                Some("iTerm.app"),
+                None,
+                false,
+                false,
+                false,
+                None,
+            ),
+            ImageProtocol::None,
+        );
+        assert_eq!(
+            ImageProtocol::detect_with_env(
+                None,
+                None,
+                Some("iTerm.app"),
+                None,
+                false,
+                true,
+                false,
+                None,
+            ),
+            ImageProtocol::ITerm2,
+        );
+        // Sixel via capability check.
+        assert_eq!(
+            ImageProtocol::detect_with_env(
+                None,
+                Some("xterm-256color"),
+                None,
+                None,
+                true,
+                false,
+                false,
+                None,
+            ),
+            ImageProtocol::Sixel,
+        );
+    }
+
+    #[test]
+    fn masking_multiplexer_recognizes_each_signal() {
+        assert!(masking_multiplexer(None, None, None, None, Some("1")));
+        assert!(masking_multiplexer(None, None, None, Some("0x1"), None));
+        assert!(masking_multiplexer(None, Some("/tmp/tmux"), None, None, None));
+        assert!(masking_multiplexer(None, None, Some("1234.pts"), None, None));
+        assert!(masking_multiplexer(Some("screen-256color"), None, None, None, None));
+        assert!(masking_multiplexer(Some("tmux-256color"), None, None, None, None));
+        assert!(!masking_multiplexer(Some("xterm-256color"), None, None, None, None));
+        assert!(!masking_multiplexer(None, Some("  "), None, None, None));
     }
 
     #[test]
