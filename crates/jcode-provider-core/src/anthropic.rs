@@ -462,6 +462,23 @@ mod tests {
     }
 
     #[test]
+    fn fable_5_is_verified_native_1m() {
+        // claude-fable-5's native 1M window is verified (not just the
+        // optimistic default for version-5 generations), so its classification
+        // must beat a stale cached catalog limit in the full resolution path.
+        assert_eq!(
+            anthropic_context_mode("claude-fable-5"),
+            AnthropicContextMode::Native1M
+        );
+        assert!(anthropic_context_mode_is_verified("claude-fable-5"));
+        assert!(anthropic_context_mode_is_verified("claude-opus-4-8"));
+        // Unprobed future generations stay optimistic (unverified) so a
+        // live catalog limit can still override them.
+        assert!(!anthropic_context_mode_is_verified("claude-fable-6"));
+        assert!(!anthropic_context_mode_is_verified("claude-haiku-5"));
+    }
+
+    #[test]
     fn reasoning_caps_match_live_verified_generations() {
         // Full ladder: Fable 5 (live 2026-07-01), Sonnet 5 (live 2026-07-07),
         // Opus 5 (live 2026-07-24), Opus 4.7/4.8.
