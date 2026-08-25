@@ -71,15 +71,25 @@ adopted on the session's next turn and never interrupts a running turn; when a
 turn holds the agent lock, the switch is deferred and applied on drain. The
 end-to-end smoke test is `scripts/asw_session_control_e2e.sh`.
 
+After an account switch the TUI client must refresh the footer's context limit
+through `App::refresh_context_limit_for_current_model`
+(`crates/jcode-tui/src/tui/app/model_context.rs`), which re-resolves the live
+session model. Never write `provider.context_window()` there: remote clients run
+an inert provider whose window is the 200K default, and the follow-up catalog
+event carries the same model, so the latch would stick (footers misreporting
+1M-window models as 200K until restart). Same rule for the model-switch path:
+`update_context_limit_for_model` is the only correct writer.
+
 ## Non-interactive model + reasoning-effort set
 
 To change a running session's model (and optionally its reasoning effort) from
 automation, use `jcode session set-model <model> [--effort <e>] [--session <sid>]`
-(`run_session_set_model_command` in `src/cli/commands.rs`), not by typing
-`/model` into the TUI composer. Typing a slash command races the autocomplete
-popup and can silently no-op, which is what drifted fleet workers onto the wrong
-model. The verb applies model and effort together and then verifies by reading
-the session state back, exiting non-zero on any mismatch or bad input.
+(`run_session_set_model_command` in `src/cli/commands/session_control.rs`), not by
+typing `/model` into the TUI composer. Typing a slash command races the
+autocomplete popup and can silently no-op, which is what drifted fleet workers
+onto the wrong model. The verb applies model and effort together and then
+verifies by reading the session state back, exiting non-zero on any mismatch or
+bad input.
 
 It rides the debug socket, which is opt-in via `[display] debug_socket = true` in
 `~/.jcode/config.toml`. The transport is the shared `send_debug_command` helper in

@@ -1053,8 +1053,7 @@ impl App {
                     )));
                 }
                 crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
+                self.refresh_context_limit_for_current_model();
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -1125,8 +1124,7 @@ impl App {
                     label
                 )));
                 crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
+                self.refresh_context_limit_for_current_model();
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(

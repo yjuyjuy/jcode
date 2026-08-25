@@ -838,4 +838,94 @@ mod tests {
             assert!(is_openai_api_only_pro_model(pro));
         }
     }
+
+    #[test]
+    fn verified_claude_generations_beat_a_stale_cached_200k_limit() {
+        // Regression for the live misidentification of claude-opus-4-8 /
+        // claude-fable-5 as 200K-window models. The context-limit resolution
+        // walks cache + catalog + config precedence; a stale on-disk catalog
+        // (or the 200K fallback) captured before these models existed must not
+        // shrink the meter for generations whose long-context behavior the
+        // static classifier has verified against the live API.
+        let stale_cache = |_model: &str| Some(200_000);
+
+        // Opus 4.8 is a verified Native1M generation. The verified
+        // classification is consulted before the dynamic cache, so a poisoned
+        // cache cannot win here.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-opus-4-8",
+                Some("claude"),
+                stale_cache,
+            ),
+            Some(1_000_000)
+        );
+        // Provider-hint-free resolution (provider auto-detected from the id)
+        // must take the same path.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache("claude-opus-4-8", None, stale_cache),
+            Some(1_000_000)
+        );
+        // The provider hint spelling the runtime uses ("anthropic").
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-opus-4-8",
+                Some("anthropic"),
+                stale_cache,
+            ),
+            Some(1_000_000)
+        );
+
+        // Fable 5 is a verified Native1M generation too: its own window must
+        // not be overruled by a stale cached catalog entry.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-fable-5",
+                Some("claude"),
+                stale_cache,
+            ),
+            Some(1_000_000)
+        );
+
+        // A genuinely 200K-capped verified generation must keep its real
+        // window even though the cache claim happens to match.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-sonnet-4-5",
+                Some("claude"),
+                stale_cache,
+            ),
+            Some(200_000)
+        );
+        // And the opt-in 1M generation still gets its 200K default window
+        // without the [1m] suffix.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-opus-4-6",
+                Some("claude"),
+                stale_cache,
+            ),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn known_claude_generations_resolve_through_the_fallback_path_when_cache_is_empty() {
+        // With no cached context limit at all (empty dynamic cache, no config
+        // overrides), every known Claude generation still resolves from the
+        // static classifier instead of the 200K default.
+        let empty_cache = |_model: &str| None;
+        for (model, expected) in [
+            ("claude-opus-4-8", 1_000_000),
+            ("claude-fable-5", 1_000_000),
+            ("claude-opus-5", 1_000_000),
+            ("claude-sonnet-4-5", 200_000),
+        ] {
+            assert_eq!(
+                context_limit_for_model_with_provider_and_cache(model, Some("claude"), empty_cache),
+                Some(expected),
+                "{model} should resolve from the static classifier"
+            );
+        }
+    }
 }
