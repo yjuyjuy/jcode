@@ -33,6 +33,7 @@ pub use restart::{
     maybe_run_pending_restart_restore_on_startup, run_restart_clear_command,
     run_restart_restore_command, run_restart_save_command, run_restart_status_command,
 };
+pub(crate) use session_control::run_session_command;
 pub use session_control::{run_session_list_command, run_session_switch_account_command};
 
 pub enum AmbientSubcommand {

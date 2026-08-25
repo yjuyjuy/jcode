@@ -3,20 +3,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::server;
 
-pub async fn run_debug_command(
-    command: &str,
-    arg: &str,
-    session_id: Option<String>,
-    socket_path: Option<String>,
-    _wait: bool,
-) -> Result<()> {
-    match command {
-        "list" => return debug_list_servers().await,
-        "start" => return debug_start_server(arg, socket_path).await,
-        _ => {}
-    }
+/// One decoded reply from the debug socket. `ok` mirrors the server's
+/// `debug_response.ok`; a protocol-level `error` reply is normalized to
+/// `ok = false` with the message in `output`. Transport failures (no socket,
+/// disconnect, malformed frame) surface as `Err` from [`send_debug_command`].
+pub(crate) struct DebugReply {
+    pub ok: bool,
+    pub output: String,
+}
 
-    let debug_socket = if let Some(ref path) = socket_path {
+/// Resolve the debug socket path for an optional main-socket override, applying
+/// the same `<name>.sock` -> `<name>-debug.sock` derivation the debug CLI uses.
+pub(crate) fn resolve_debug_socket_path(socket_path: Option<&str>) -> std::path::PathBuf {
+    if let Some(path) = socket_path {
         let main_path = std::path::PathBuf::from(path);
         let filename = main_path
             .file_name()
@@ -26,7 +25,22 @@ pub async fn run_debug_command(
         main_path.with_file_name(debug_filename)
     } else {
         server::debug_socket_path()
-    };
+    }
+}
+
+/// Send one `debug_command` over the debug socket and return the decoded reply.
+///
+/// This is the single non-interactive debug-socket transport, shared by the
+/// `jcode debug` CLI and higher-level verbs (e.g. `jcode session set-model`).
+/// Callers decide how to present `ok`/`output`; only transport-level problems
+/// are `Err`. When the socket is missing, a helpful hint is printed to stderr
+/// (matching the `jcode debug` UX) before erroring.
+pub(crate) async fn send_debug_command(
+    debug_cmd: &str,
+    session_id: Option<&str>,
+    socket_path: Option<&str>,
+) -> Result<DebugReply> {
+    let debug_socket = resolve_debug_socket_path(socket_path);
 
     if !crate::transport::is_socket_path(&debug_socket) {
         eprintln!("Debug socket not found at {:?}", debug_socket);
@@ -43,12 +57,6 @@ pub async fn run_debug_command(
     let stream = server::connect_socket(&debug_socket).await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-
-    let debug_cmd = if arg.is_empty() {
-        command.to_string()
-    } else {
-        format!("{}:{}", command, arg)
-    };
 
     let request = serde_json::json!({
         "type": "debug_command",
@@ -68,7 +76,6 @@ pub async fn run_debug_command(
     }
 
     let response: serde_json::Value = serde_json::from_str(&line)?;
-
     match response.get("type").and_then(|v| v.as_str()) {
         Some("debug_response") => {
             let ok = response
@@ -78,26 +85,54 @@ pub async fn run_debug_command(
             let output = response
                 .get("output")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if ok {
-                println!("{}", output);
-            } else {
-                eprintln!("Error: {}", output);
-                std::process::exit(1);
-            }
+                .unwrap_or("")
+                .to_string();
+            Ok(DebugReply { ok, output })
         }
         Some("error") => {
             let message = response
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Unknown error");
-            eprintln!("Error: {}", message);
-            std::process::exit(1);
+                .unwrap_or("Unknown error")
+                .to_string();
+            Ok(DebugReply {
+                ok: false,
+                output: message,
+            })
         }
-        _ => {
-            println!("{}", serde_json::to_string_pretty(&response)?);
-        }
+        _ => Ok(DebugReply {
+            ok: true,
+            output: serde_json::to_string_pretty(&response)?,
+        }),
+    }
+}
+
+pub async fn run_debug_command(
+    command: &str,
+    arg: &str,
+    session_id: Option<String>,
+    socket_path: Option<String>,
+    _wait: bool,
+) -> Result<()> {
+    match command {
+        "list" => return debug_list_servers().await,
+        "start" => return debug_start_server(arg, socket_path).await,
+        _ => {}
+    }
+
+    let debug_cmd = if arg.is_empty() {
+        command.to_string()
+    } else {
+        format!("{}:{}", command, arg)
+    };
+
+    let reply =
+        send_debug_command(&debug_cmd, session_id.as_deref(), socket_path.as_deref()).await?;
+    if reply.ok {
+        println!("{}", reply.output);
+    } else {
+        eprintln!("Error: {}", reply.output);
+        std::process::exit(1);
     }
 
     Ok(())

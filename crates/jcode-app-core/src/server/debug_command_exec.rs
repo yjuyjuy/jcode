@@ -114,6 +114,53 @@ pub(super) async fn run_debug_message_with_timeout(
     }
 }
 
+/// Parse the argument to the debug `set_model:` verb into `(model, effort)`.
+///
+/// Two forms are accepted:
+///   - A JSON object `{"model": "<model>", "effort": "<effort>"}` (effort
+///     optional). This is the effort-aware form the non-interactive CLI uses; a
+///     JSON payload is required because model specs legitimately contain both
+///     `:` and `@` (e.g. `claude-api:claude-fable-5`, `z-ai/glm-5.2@Novita`),
+///     so no delimiter char can safely separate model from effort.
+///   - A bare model string (back-compat with the original `set_model:<model>`
+///     verb), which sets the model only and leaves effort untouched.
+///
+/// An empty argument, or a JSON object with an empty/missing model, is an error
+/// rather than a silent no-op: a failed set must be loud.
+fn parse_set_model_arg(arg: &str) -> Result<(String, Option<String>)> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err(anyhow::anyhow!(
+            "set_model: requires a model name or a JSON object {{\"model\":..,\"effort\":..}}"
+        ));
+    }
+
+    if arg.starts_with('{') {
+        let payload: serde_json::Value = serde_json::from_str(arg)
+            .map_err(|e| anyhow::anyhow!("set_model: invalid JSON payload: {e}"))?;
+        let model = payload
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("set_model: JSON payload requires a non-empty \"model\"")
+            })?
+            .to_string();
+        // Absent effort => leave effort unchanged. An explicitly empty effort
+        // string is treated the same as absent (no-op) rather than an error.
+        let effort = payload
+            .get("effort")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        return Ok((model, effort));
+    }
+
+    Ok((arg.to_string(), None))
+}
+
 pub(super) async fn execute_debug_command(
     agent: Arc<Mutex<Agent>>,
     command: &str,
@@ -498,6 +545,7 @@ pub(super) async fn execute_debug_command(
             "is_canary": agent.is_canary(),
             "provider": agent.provider_name(),
             "model": agent.provider_model(),
+            "effort": agent.reasoning_effort(),
             "upstream_provider": agent.last_upstream_provider(),
         });
         if let Some(identity) = server_identity {
@@ -516,22 +564,16 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_model:{\"model\":<model>,\"effort\":<effort>}, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
     if trimmed.starts_with("set_model:") {
-        let model = trimmed.strip_prefix("set_model:").unwrap_or("").trim();
-        if model.is_empty() {
-            return Err(anyhow::anyhow!("set_model: requires a model name"));
-        }
+        let arg = trimmed.strip_prefix("set_model:").unwrap_or("").trim();
+        let (model, effort) = parse_set_model_arg(arg)?;
         let mut agent = agent.lock().await;
-        agent.set_model(model)?;
-        let payload = serde_json::json!({
-            "model": agent.provider_model(),
-            "provider": agent.provider_name(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+        let applied = agent.set_model_and_effort(&model, effort.as_deref())?;
+        return Ok(serde_json::to_string_pretty(&applied).unwrap_or_else(|_| "{}".to_string()));
     }
 
     if trimmed.starts_with("set_provider:") {
@@ -641,7 +683,7 @@ mod tests {
     use jcode_agent_runtime::InterruptSignal;
     use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
@@ -704,6 +746,159 @@ mod tests {
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(Self)
         }
+    }
+
+    /// Effort-aware provider for exercising the combined `set_model:` verb and
+    /// the `state` readback of effort end to end through `execute_debug_command`.
+    #[derive(Clone)]
+    struct EffortAwareTestProvider {
+        model: Arc<Mutex<String>>,
+        effort: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl Provider for EffortAwareTestProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            Err(anyhow::anyhow!("not called in debug command tests"))
+        }
+
+        fn name(&self) -> &str {
+            "effort-aware"
+        }
+
+        fn model(&self) -> String {
+            self.model.lock().unwrap().clone()
+        }
+
+        fn set_model(&self, request: &str) -> Result<()> {
+            if request == "no-such-model" {
+                anyhow::bail!("Model {} not supported", request);
+            }
+            *self.model.lock().unwrap() = request.to_string();
+            Ok(())
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            self.effort.lock().unwrap().clone()
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+            let requested = effort.trim().to_ascii_lowercase();
+            let normalized = match requested.as_str() {
+                "default" | "auto" | "" => None,
+                "none" | "low" | "medium" | "high" | "xhigh" | "max" => Some(requested),
+                other => anyhow::bail!("Unsupported effort '{}'", other),
+            };
+            *self.effort.lock().unwrap() = normalized;
+            Ok(())
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    async fn effort_aware_agent(model: &str) -> Arc<AsyncMutex<Agent>> {
+        let provider: Arc<dyn Provider> = Arc::new(EffortAwareTestProvider {
+            model: Arc::new(Mutex::new(model.to_string())),
+            effort: Arc::new(Mutex::new(None)),
+        });
+        let registry = Registry::new(provider.clone()).await;
+        Arc::new(AsyncMutex::new(Agent::new(provider, registry)))
+    }
+
+    #[tokio::test]
+    async fn debug_set_model_json_sets_effort_and_state_reports_it() {
+        let _env_lock = lock_env();
+        let _test_session = EnvGuard::set("JCODE_TEST_SESSION", "1");
+        let agent = effort_aware_agent("model-a").await;
+        let debug_jobs = Arc::new(RwLock::new(HashMap::new()));
+
+        let apply = execute_debug_command(
+            Arc::clone(&agent),
+            r#"set_model:{"model":"model-b","effort":"high"}"#,
+            Arc::clone(&debug_jobs),
+            None,
+            None,
+        )
+        .await
+        .expect("combined set_model should succeed");
+        let apply: serde_json::Value = serde_json::from_str(&apply).expect("apply json");
+        assert_eq!(apply.get("model").and_then(|v| v.as_str()), Some("model-b"));
+        assert_eq!(apply.get("effort").and_then(|v| v.as_str()), Some("high"));
+
+        // The independent `state` readback must reflect the new effort - this is
+        // the field verification (and future tooling) depends on.
+        let state = execute_debug_command(
+            Arc::clone(&agent),
+            "state",
+            Arc::clone(&debug_jobs),
+            None,
+            None,
+        )
+        .await
+        .expect("state should succeed");
+        let state: serde_json::Value = serde_json::from_str(&state).expect("state json");
+        assert_eq!(state.get("model").and_then(|v| v.as_str()), Some("model-b"));
+        assert_eq!(state.get("effort").and_then(|v| v.as_str()), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn debug_set_model_json_bad_effort_errors_not_silent_noop() {
+        let _env_lock = lock_env();
+        let _test_session = EnvGuard::set("JCODE_TEST_SESSION", "1");
+        let agent = effort_aware_agent("model-a").await;
+        let debug_jobs = Arc::new(RwLock::new(HashMap::new()));
+
+        let err = execute_debug_command(
+            Arc::clone(&agent),
+            r#"set_model:{"model":"model-b","effort":"bogus"}"#,
+            Arc::clone(&debug_jobs),
+            None,
+            None,
+        )
+        .await
+        .expect_err("a bad effort must error loudly, not no-op");
+        assert!(err.to_string().contains("bogus"), "err: {err}");
+
+        // Atomic rollback: the model must not have moved off its original value.
+        let state = execute_debug_command(
+            Arc::clone(&agent),
+            "state",
+            Arc::clone(&debug_jobs),
+            None,
+            None,
+        )
+        .await
+        .expect("state should succeed");
+        let state: serde_json::Value = serde_json::from_str(&state).expect("state json");
+        assert_eq!(state.get("model").and_then(|v| v.as_str()), Some("model-a"));
+    }
+
+    #[tokio::test]
+    async fn debug_set_model_plain_form_still_works() {
+        let _env_lock = lock_env();
+        let _test_session = EnvGuard::set("JCODE_TEST_SESSION", "1");
+        let agent = effort_aware_agent("model-a").await;
+        let debug_jobs = Arc::new(RwLock::new(HashMap::new()));
+
+        let apply = execute_debug_command(
+            Arc::clone(&agent),
+            "set_model:model-b",
+            Arc::clone(&debug_jobs),
+            None,
+            None,
+        )
+        .await
+        .expect("bare set_model should still work");
+        let apply: serde_json::Value = serde_json::from_str(&apply).expect("apply json");
+        assert_eq!(apply.get("model").and_then(|v| v.as_str()), Some("model-b"));
     }
 
     #[tokio::test]
@@ -811,5 +1006,60 @@ mod tests {
         let pending = queue.lock().expect("queue lock should not be poisoned");
         assert_eq!(pending.len(), 1);
         assert!(pending[0].urgent);
+    }
+
+    #[test]
+    fn parse_set_model_arg_accepts_bare_model() {
+        let (model, effort) = super::parse_set_model_arg("claude-fable-5").expect("bare model");
+        assert_eq!(model, "claude-fable-5");
+        assert_eq!(effort, None);
+    }
+
+    #[test]
+    fn parse_set_model_arg_accepts_model_with_route_prefix_and_pin() {
+        // Model specs legitimately contain ':' and '@'; the bare form must not
+        // try to split them into model/effort.
+        let (model, effort) =
+            super::parse_set_model_arg("claude-api:claude-fable-5").expect("route-prefixed model");
+        assert_eq!(model, "claude-api:claude-fable-5");
+        assert_eq!(effort, None);
+
+        let (model, effort) =
+            super::parse_set_model_arg("z-ai/glm-5.2@Novita").expect("pinned model");
+        assert_eq!(model, "z-ai/glm-5.2@Novita");
+        assert_eq!(effort, None);
+    }
+
+    #[test]
+    fn parse_set_model_arg_accepts_json_with_effort() {
+        let (model, effort) =
+            super::parse_set_model_arg(r#"{"model":"claude-api:claude-fable-5","effort":"high"}"#)
+                .expect("json with effort");
+        assert_eq!(model, "claude-api:claude-fable-5");
+        assert_eq!(effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn parse_set_model_arg_json_effort_optional() {
+        let (model, effort) =
+            super::parse_set_model_arg(r#"{"model":"model-b"}"#).expect("json without effort");
+        assert_eq!(model, "model-b");
+        assert_eq!(effort, None);
+
+        // An explicitly empty effort is treated as absent (no-op), not an error.
+        let (model, effort) = super::parse_set_model_arg(r#"{"model":"model-b","effort":""}"#)
+            .expect("json empty effort");
+        assert_eq!(model, "model-b");
+        assert_eq!(effort, None);
+    }
+
+    #[test]
+    fn parse_set_model_arg_rejects_empty_and_missing_model() {
+        assert!(super::parse_set_model_arg("").is_err());
+        assert!(super::parse_set_model_arg("   ").is_err());
+        assert!(super::parse_set_model_arg(r#"{"effort":"high"}"#).is_err());
+        assert!(super::parse_set_model_arg(r#"{"model":""}"#).is_err());
+        // Malformed JSON is a loud error, not a silent fallthrough.
+        assert!(super::parse_set_model_arg(r#"{"model":"#).is_err());
     }
 }

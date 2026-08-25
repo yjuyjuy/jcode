@@ -960,6 +960,45 @@ pub(crate) enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Set a live session's model and (optionally) its reasoning effort,
+    /// non-interactively, against the running server, and verify the change by
+    /// reading the session state back.
+    ///
+    /// This is the reliable replacement for typing `/model <X>` into the TUI
+    /// composer, which races the slash-command autocomplete popup and can
+    /// silently no-op. It talks to the server over its debug socket (enable with
+    /// `[display] debug_socket = true` in `~/.jcode/config.toml`), applies model
+    /// and effort together, then re-reads the session and fails loudly (non-zero
+    /// exit) if the applied state does not match the request. Idempotent: setting
+    /// the same model+effort twice yields the same verified end state.
+    #[command(name = "set-model")]
+    SetModel {
+        /// Model spec to switch to, including any provider routing prefix
+        /// (e.g. "claude-fable-5", "claude-api:claude-fable-5",
+        /// "openai-oauth:gpt-5").
+        model: String,
+
+        /// Reasoning effort to set atomically with the model. Levels are
+        /// provider- and model-specific (e.g. Anthropic: none|low|medium|high|
+        /// xhigh|max); an unsupported value fails loudly. Omit to leave the
+        /// session's current effort unchanged.
+        #[arg(long)]
+        effort: Option<String>,
+
+        /// Target a specific session by ID or short name. Omit to target the
+        /// server's single active session (errors if more than one is live).
+        #[arg(short = 'S', long)]
+        session: Option<String>,
+
+        /// Connect to a specific server socket path instead of the default.
+        #[arg(short = 's', long)]
+        socket: Option<String>,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
