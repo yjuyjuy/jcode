@@ -459,7 +459,7 @@ async fn apply_terminal_event(
                                         )));
                                     } else {
                                         crate::auth::AuthStatus::invalidate_cache();
-                app.refresh_context_limit_for_current_model();
+                                        app.refresh_context_limit_for_current_model();
                                         let _ = remote.switch_anthropic_account(&label).await;
                                         app.push_display_message(DisplayMessage::system(format!(
                                             "Switched to Anthropic account `{}`.",
@@ -479,7 +479,7 @@ async fn apply_terminal_event(
                                         )));
                                     } else {
                                         crate::auth::AuthStatus::invalidate_cache();
-                app.refresh_context_limit_for_current_model();
+                                        app.refresh_context_limit_for_current_model();
                                         let _ = remote.switch_openai_account(&label).await;
                                         app.push_display_message(DisplayMessage::system(format!(
                                             "Switched to OpenAI account `{}`.",
