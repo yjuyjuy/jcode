@@ -146,16 +146,14 @@ fn render_switch_outcome_line(outcome: &crate::protocol::SessionSwitchOutcome) -
         "failed"
     };
     let account = outcome.account.as_deref().unwrap_or("?");
-    let model_note = outcome
-        .model
-        .as_deref()
-        .map(|m| format!(" model={m}"))
-        .unwrap_or_default();
-    let error = outcome
-        .error
-        .as_deref()
-        .map(|e| format!(" - {e}"))
-        .unwrap_or_default();
+    let model_note = match outcome.model.as_deref() {
+        Some(model) => format!(" model={model}"),
+        None => String::new(),
+    };
+    let error = match outcome.error.as_deref() {
+        Some(error) => format!(" - {error}"),
+        None => String::new(),
+    };
     format!(
         "{}: {} account={}{}{}",
         outcome.session_id, status, account, model_note, error
