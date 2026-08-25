@@ -2103,3 +2103,64 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
         );
     }
 }
+
+/// A terminal rate-limit error must carry a `retry_after_secs` hint so the
+/// client can hold and reschedule the turn instead of dropping it. A bare
+/// Anthropic "Rate limited" 429 with no `Retry-After` header falls back to the
+/// bounded burst floor.
+#[test]
+fn terminal_rate_limit_without_header_uses_burst_floor() {
+    let bare = anyhow::anyhow!(
+        "Retryable stream error: {{\"type\":\"error\",\"error\":{{\"type\":\"rate_limit_error\",\"message\":\"Rate limited\"}},\"request_id\":\"req_011CePo4JJyJeBKdhQ9aGU87\"}}"
+    );
+    assert_eq!(
+        rate_limit_retry_after_secs(&bare),
+        Some(RATE_LIMIT_BURST_FLOOR_SECS),
+        "a bare rate-limit error must still yield a bounded retry-after hint"
+    );
+
+    let wrapped = anyhow::anyhow!("Failed after {} retries: {:#}", MAX_RETRIES, bare);
+    assert_eq!(
+        rate_limit_retry_after_secs(&wrapped),
+        Some(RATE_LIMIT_BURST_FLOOR_SECS),
+        "the exhausted-loop message must also yield a retry-after hint"
+    );
+}
+
+/// When the 429 carried a `Retry-After` header, that value (capped by the
+/// retry-after core) is preferred over the burst floor.
+#[test]
+fn terminal_rate_limit_prefers_retry_after_header() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::RETRY_AFTER,
+        reqwest::header::HeaderValue::from_static("7"),
+    );
+    let retry_after = jcode_provider_core::retry_after::retry_after(&headers);
+    let error = jcode_provider_core::retry_after::error_with_retry_after(
+        "Anthropic API error (429 Too Many Requests): rate_limit_error".to_string(),
+        retry_after,
+    );
+
+    let secs =
+        rate_limit_retry_after_secs(&error).expect("a 429 with a header must yield a hint");
+    assert!(
+        secs > 0 && secs <= 7,
+        "expected the header-derived hint (<=7s), got {secs}"
+    );
+    assert_ne!(
+        secs, RATE_LIMIT_BURST_FLOOR_SECS,
+        "a real header must be preferred over the burst floor"
+    );
+}
+
+/// A non-rate-limit error must NOT be tagged with a retry-after hint, so
+/// ordinary failures keep their existing no-retry semantics.
+#[test]
+fn non_rate_limit_error_has_no_retry_after_hint() {
+    let error = anyhow::anyhow!("500 internal server error: something broke");
+    assert_eq!(rate_limit_retry_after_secs(&error), None);
+
+    let timeout = anyhow::anyhow!("Stream read timeout: no data received for 120 seconds");
+    assert_eq!(rate_limit_retry_after_secs(&timeout), None);
+}
