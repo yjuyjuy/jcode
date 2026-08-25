@@ -1612,38 +1612,56 @@ pub async fn run_session_switch_account_command(
             println!("No live sessions matched.");
         }
         for outcome in &results {
-            let status = if outcome.ok {
-                if outcome.deferred {
-                    "ok (deferred to next turn)"
-                } else {
-                    "ok"
-                }
-            } else {
-                "failed"
-            };
-            let account = outcome.account.as_deref().unwrap_or("?");
-            let model_note = outcome
-                .model
-                .as_deref()
-                .map(|m| format!(" model={m}"))
-                .unwrap_or_default();
-            let error = outcome
-                .error
-                .as_deref()
-                .map(|e| format!(" - {e}"))
-                .unwrap_or_default();
-            println!(
-                "{}: {} account={}{}{}",
-                outcome.session_id, status, account, model_note, error
-            );
+            println!("{}", render_switch_outcome_line(outcome));
         }
     }
 
     // Exit non-zero when any target failed so scripts can gate on it.
-    if results.iter().any(|outcome| !outcome.ok) {
+    if switch_results_any_failed(&results) {
         anyhow::bail!("one or more sessions failed to switch");
     }
     Ok(())
+}
+
+/// Render one per-session switch outcome as a human-readable status line.
+///
+/// Pure so the orchestrator-facing wording (which the captain report is built
+/// from) can be asserted without a live daemon: a deferred switch is still a
+/// success, a failure carries its reason, and an atomic model switch names the
+/// model it moved to.
+fn render_switch_outcome_line(outcome: &crate::protocol::SessionSwitchOutcome) -> String {
+    let status = if outcome.ok {
+        if outcome.deferred {
+            "ok (deferred to next turn)"
+        } else {
+            "ok"
+        }
+    } else {
+        "failed"
+    };
+    let account = outcome.account.as_deref().unwrap_or("?");
+    let model_note = outcome
+        .model
+        .as_deref()
+        .map(|m| format!(" model={m}"))
+        .unwrap_or_default();
+    let error = outcome
+        .error
+        .as_deref()
+        .map(|e| format!(" - {e}"))
+        .unwrap_or_default();
+    format!(
+        "{}: {} account={}{}{}",
+        outcome.session_id, status, account, model_note, error
+    )
+}
+
+/// Whether any per-session switch outcome failed. The CLI exits non-zero when
+/// this is true so an orchestrator (quota-axi's fenced `switch` verb, or
+/// firstmate's rotate path) can gate on the process exit status: a single
+/// unknown-label refusal must fail the whole invocation, never pass silently.
+fn switch_results_any_failed(results: &[crate::protocol::SessionSwitchOutcome]) -> bool {
+    results.iter().any(|outcome| !outcome.ok)
 }
 
 async fn run_ambient_visible() -> Result<()> {
