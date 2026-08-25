@@ -2470,6 +2470,7 @@ fn test_rate_limit_without_retry_after_holds_pending_and_reschedules() {
         content: "do the thing".to_string(),
         images: vec![],
         is_system: false,
+        system_reminder: None,
         // A normal user send: auto_retry is false. This is the case the old
         // handler dropped.
         auto_retry: false,
@@ -2531,6 +2532,7 @@ fn test_bare_rate_limit_json_schedules_bounded_hold_not_drop() {
         content: "continue".to_string(),
         images: vec![],
         is_system: true,
+        system_reminder: None,
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
