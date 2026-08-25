@@ -8,7 +8,7 @@ use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
-use crate::{browser, gateway, memory, storage, tui};
+use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::{output::terminal_title, terminal::init_tui_runtime};
 
@@ -16,7 +16,7 @@ mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
-mod session_cmds;
+mod session_control;
 
 pub(crate) use super::auth_test::run_post_login_validation;
 #[cfg(test)]
@@ -33,7 +33,8 @@ pub use restart::{
     maybe_run_pending_restart_restore_on_startup, run_restart_clear_command,
     run_restart_restore_command, run_restart_save_command, run_restart_status_command,
 };
-pub(crate) use session_cmds::run_session_command;
+pub use session_control::{run_session_list_command, run_session_switch_account_command};
+pub(crate) use session_control::run_session_command;
 
 pub enum AmbientSubcommand {
     Status,
@@ -1456,6 +1457,59 @@ pub async fn run_dictate_command(type_output: bool) -> Result<()> {
     } else {
         run_transcript_command(Some(run.text), run.mode, None).await
     }
+}
+
+#[derive(Serialize)]
+struct SessionRenameOutput {
+    session_id: String,
+    display_name: String,
+    title: Option<String>,
+    cleared: bool,
+}
+
+pub fn run_session_rename_command(
+    session_ref: &str,
+    name: Option<&str>,
+    clear: bool,
+    json: bool,
+) -> Result<()> {
+    let resolved_id = session::find_session_by_name_or_id(session_ref)?;
+    let mut session = session::Session::load(&resolved_id)?;
+
+    if clear {
+        session.rename_title(None);
+    } else {
+        let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+            anyhow::bail!("Provide a session name or use --clear");
+        };
+        session.rename_title(Some(name.to_string()));
+    }
+
+    session.save()?;
+    crate::tui::session_picker::invalidate_session_list_cache();
+
+    let output = SessionRenameOutput {
+        session_id: session.id.clone(),
+        display_name: session.display_name().to_string(),
+        title: session.display_title().map(ToOwned::to_owned),
+        cleared: clear,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if clear {
+        println!(
+            "Cleared custom name for session {} ({}).",
+            output.display_name, output.session_id
+        );
+    } else if let Some(title) = output.title.as_deref() {
+        println!(
+            "Renamed session {} ({}) to \"{}\".",
+            output.display_name, output.session_id, title
+        );
+    }
+
+    Ok(())
 }
 
 async fn run_ambient_visible() -> Result<()> {

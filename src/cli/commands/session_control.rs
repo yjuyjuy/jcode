@@ -1,9 +1,14 @@
-//! `jcode session ...` subcommand handlers.
+//! CLI entry points for the live-session account-switch control surface
+//! (ADR 0031, Phase 1).
 //!
-//! Split out of `commands.rs` to keep that file within the code-size ratchet.
-//! These are the headless, non-interactive session control-surface verbs
-//! (`rename`, `list`, `switch-account`, `set-model`) used by automation and the
-//! account-switch orchestrator (ADR 0031).
+//! These are the headless commands an external orchestrator (quota-axi's fenced
+//! `switch` verb, or firstmate's rotate path) drives to actuate an account
+//! rotation onto running jcode sessions without terminal injection:
+//! `jcode session list` enumerates live sessions, and
+//! `jcode session switch-account` moves one or all of them to a new account
+//! (optionally with an atomic model change). The switch mechanics live in the
+//! daemon (`crates/jcode-app-core/src/server/session_control.rs`); this module
+//! is the thin CLI presentation and exit-status layer over the socket client.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -12,8 +17,8 @@ use crate::cli::args::SessionCommand;
 use crate::session;
 
 /// Dispatch a parsed `jcode session <subcommand>` to its handler. Kept beside
-/// the handlers so `dispatch.rs` stays a thin router (and within its code-size
-/// ratchet). `pub(crate)` because `SessionCommand` is a crate-internal arg enum.
+/// the session control-surface handlers so `dispatch.rs` stays a thin router
+/// (and within its code-size ratchet).
 pub(crate) async fn run_session_command(subcmd: SessionCommand) -> Result<()> {
     match subcmd {
         SessionCommand::Rename {
@@ -21,7 +26,7 @@ pub(crate) async fn run_session_command(subcmd: SessionCommand) -> Result<()> {
             name,
             clear,
             json,
-        } => run_session_rename_command(&session, name.as_deref(), clear, json),
+        } => super::run_session_rename_command(&session, name.as_deref(), clear, json),
         SessionCommand::List { json } => run_session_list_command(json).await,
         SessionCommand::SwitchAccount {
             session,
@@ -42,59 +47,6 @@ pub(crate) async fn run_session_command(subcmd: SessionCommand) -> Result<()> {
     }
 }
 
-#[derive(Serialize)]
-struct SessionRenameOutput {
-    session_id: String,
-    display_name: String,
-    title: Option<String>,
-    cleared: bool,
-}
-
-pub(crate) fn run_session_rename_command(
-    session_ref: &str,
-    name: Option<&str>,
-    clear: bool,
-    json: bool,
-) -> Result<()> {
-    let resolved_id = session::find_session_by_name_or_id(session_ref)?;
-    let mut session = session::Session::load(&resolved_id)?;
-
-    if clear {
-        session.rename_title(None);
-    } else {
-        let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
-            anyhow::bail!("Provide a session name or use --clear");
-        };
-        session.rename_title(Some(name.to_string()));
-    }
-
-    session.save()?;
-    crate::tui::session_picker::invalidate_session_list_cache();
-
-    let output = SessionRenameOutput {
-        session_id: session.id.clone(),
-        display_name: session.display_name().to_string(),
-        title: session.display_title().map(ToOwned::to_owned),
-        cleared: clear,
-    };
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else if clear {
-        println!(
-            "Cleared custom name for session {} ({}).",
-            output.display_name, output.session_id
-        );
-    } else if let Some(title) = output.title.as_deref() {
-        println!(
-            "Renamed session {} ({}) to \"{}\".",
-            output.display_name, output.session_id, title
-        );
-    }
-
-    Ok(())
-}
-
 /// One live session row for `jcode session list`.
 #[derive(Debug, Serialize)]
 struct SessionListRow {
@@ -112,7 +64,7 @@ struct SessionListRow {
 
 /// `jcode session list`: enumerate live sessions with provider/account/model.
 /// Headless control surface for the account-switch orchestrator (ADR 0031).
-pub(crate) async fn run_session_list_command(json: bool) -> Result<()> {
+pub async fn run_session_list_command(json: bool) -> Result<()> {
     let mut client = crate::server::Client::connect().await?;
     let sessions = client.list_sessions().await?;
 
@@ -155,7 +107,7 @@ pub(crate) async fn run_session_list_command(json: bool) -> Result<()> {
 /// `jcode session switch-account`: switch a live session's account, optionally
 /// with an atomic model change, per-session or all-sessions. Reports per-session
 /// success/failure. Part of the account-switch control surface (ADR 0031).
-pub(crate) async fn run_session_switch_account_command(
+pub async fn run_session_switch_account_command(
     session: Option<String>,
     all: bool,
     account: &str,
@@ -198,38 +150,54 @@ pub(crate) async fn run_session_switch_account_command(
             println!("No live sessions matched.");
         }
         for outcome in &results {
-            let status = if outcome.ok {
-                if outcome.deferred {
-                    "ok (deferred to next turn)"
-                } else {
-                    "ok"
-                }
-            } else {
-                "failed"
-            };
-            let account = outcome.account.as_deref().unwrap_or("?");
-            let model_note = outcome
-                .model
-                .as_deref()
-                .map(|m| format!(" model={m}"))
-                .unwrap_or_else(String::new);
-            let error = outcome
-                .error
-                .as_deref()
-                .map(|e| format!(" - {e}"))
-                .unwrap_or_else(String::new);
-            println!(
-                "{}: {} account={}{}{}",
-                outcome.session_id, status, account, model_note, error
-            );
+            println!("{}", render_switch_outcome_line(outcome));
         }
     }
 
     // Exit non-zero when any target failed so scripts can gate on it.
-    if results.iter().any(|outcome| !outcome.ok) {
+    if switch_results_any_failed(&results) {
         anyhow::bail!("one or more sessions failed to switch");
     }
     Ok(())
+}
+
+/// Render one per-session switch outcome as a human-readable status line.
+///
+/// Pure so the orchestrator-facing wording (which the captain report is built
+/// from) can be asserted without a live daemon: a deferred switch is still a
+/// success, a failure carries its reason, and an atomic model switch names the
+/// model it moved to.
+fn render_switch_outcome_line(outcome: &crate::protocol::SessionSwitchOutcome) -> String {
+    let status = if outcome.ok {
+        if outcome.deferred {
+            "ok (deferred to next turn)"
+        } else {
+            "ok"
+        }
+    } else {
+        "failed"
+    };
+    let account = outcome.account.as_deref().unwrap_or("?");
+    let model_note = match outcome.model.as_deref() {
+        Some(model) => format!(" model={model}"),
+        None => String::new(),
+    };
+    let error = match outcome.error.as_deref() {
+        Some(error) => format!(" - {error}"),
+        None => String::new(),
+    };
+    format!(
+        "{}: {} account={}{}{}",
+        outcome.session_id, status, account, model_note, error
+    )
+}
+
+/// Whether any per-session switch outcome failed. The CLI exits non-zero when
+/// this is true so an orchestrator (quota-axi's fenced `switch` verb, or
+/// firstmate's rotate path) can gate on the process exit status: a single
+/// unknown-label refusal must fail the whole invocation, never pass silently.
+fn switch_results_any_failed(results: &[crate::protocol::SessionSwitchOutcome]) -> bool {
+    results.iter().any(|outcome| !outcome.ok)
 }
 
 /// Does the applied (resolved) model reflect the requested model spec?
@@ -489,5 +457,161 @@ fn report_set_model_failure(
 }
 
 #[cfg(test)]
-#[path = "session_cmds_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+
+    // Account-switch actuation CLI plumbing (ADR 0031). These assert the
+    // orchestrator-facing render/exit contract without a live daemon: the switch
+    // itself is exercised end-to-end by the server unit tests
+    // (crates/jcode-app-core/src/server/session_control_tests.rs) and
+    // scripts/asw_session_control_e2e.sh. The captain report line
+    // ("account exhausted ..., rotated to claude-2, ...") is built from these
+    // rows, so the wording here is load-bearing.
+
+    fn switch_outcome(
+        session_id: &str,
+        ok: bool,
+        account: Option<&str>,
+        model: Option<&str>,
+        deferred: bool,
+        error: Option<&str>,
+    ) -> crate::protocol::SessionSwitchOutcome {
+        crate::protocol::SessionSwitchOutcome {
+            session_id: session_id.to_string(),
+            ok,
+            account: account.map(str::to_string),
+            model: model.map(str::to_string),
+            deferred,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn render_switch_outcome_line_reports_applied_account() {
+        let line = render_switch_outcome_line(&switch_outcome(
+            "sess-a",
+            true,
+            Some("claude-2"),
+            None,
+            false,
+            None,
+        ));
+        assert_eq!(line, "sess-a: ok account=claude-2");
+    }
+
+    #[test]
+    fn render_switch_outcome_line_marks_deferred_switch_as_ok() {
+        // A busy session defers to its next turn; the orchestrator must still read
+        // this as a success, not a failure, so the "ok" prefix is required.
+        let line = render_switch_outcome_line(&switch_outcome(
+            "sess-b",
+            true,
+            Some("claude-2"),
+            None,
+            true,
+            None,
+        ));
+        assert_eq!(line, "sess-b: ok (deferred to next turn) account=claude-2");
+    }
+
+    #[test]
+    fn render_switch_outcome_line_names_atomic_model_switch() {
+        let line = render_switch_outcome_line(&switch_outcome(
+            "sess-c",
+            true,
+            Some("openai-2"),
+            Some("openai-oauth:gpt-5"),
+            false,
+            None,
+        ));
+        assert_eq!(line, "sess-c: ok account=openai-2 model=openai-oauth:gpt-5");
+    }
+
+    #[test]
+    fn render_switch_outcome_line_carries_unknown_label_error() {
+        // The unknown-label refusal path: the provider runtime rejects a label
+        // that is not in auth.json, and its reason must reach the operator
+        // verbatim.
+        let line = render_switch_outcome_line(&switch_outcome(
+            "sess-d",
+            false,
+            Some("no-such-account"),
+            None,
+            false,
+            Some("Cannot pin Anthropic account 'no-such-account'"),
+        ));
+        assert_eq!(
+            line,
+            "sess-d: failed account=no-such-account - Cannot pin Anthropic account 'no-such-account'"
+        );
+    }
+
+    #[test]
+    fn switch_results_any_failed_flags_a_single_failure() {
+        // One unknown-label refusal in an --all sweep must fail the whole command
+        // so the orchestrator's exit-status gate catches it.
+        let results = vec![
+            switch_outcome("sess-a", true, Some("claude-2"), None, false, None),
+            switch_outcome(
+                "sess-b",
+                false,
+                Some("claude-2"),
+                None,
+                false,
+                Some("no account"),
+            ),
+        ];
+        assert!(switch_results_any_failed(&results));
+    }
+
+    #[test]
+    fn switch_results_any_failed_passes_when_all_ok() {
+        let results = vec![
+            switch_outcome("sess-a", true, Some("claude-2"), None, false, None),
+            switch_outcome("sess-b", true, Some("claude-2"), None, true, None),
+        ];
+        assert!(!switch_results_any_failed(&results));
+    }
+
+    #[test]
+    fn switch_results_any_failed_treats_empty_as_no_failure() {
+        // No live session matched: an empty result set is not a failure, so
+        // `--all` on an idle fleet exits zero rather than erroring.
+        assert!(!switch_results_any_failed(&[]));
+    }
+
+    #[test]
+    fn request_model_matches_plain_and_prefixed_and_pinned() {
+        // Exact match (the common fleet case: a plain id in, a plain id back).
+        assert!(request_model_matches(
+            "deepseek-v4-flash",
+            "deepseek-v4-flash"
+        ));
+        // A route prefix on the request is consumed; the applied id is bare.
+        assert!(request_model_matches(
+            "claude-api:claude-fable-5",
+            "claude-fable-5"
+        ));
+        // An explicit @pin on the applied model still matches the bare request.
+        assert!(request_model_matches("z-ai/glm-5.2", "z-ai/glm-5.2@Novita"));
+        // Case-insensitive.
+        assert!(request_model_matches("Claude-Fable-5", "claude-fable-5"));
+        // OpenRouter vendor/model ids (which contain '/') are not mistaken for a
+        // route prefix.
+        assert!(request_model_matches("z-ai/glm-5.2", "z-ai/glm-5.2"));
+    }
+
+    #[test]
+    fn request_model_matches_rejects_a_different_model() {
+        // The whole point: a genuinely different applied model must NOT verify,
+        // so a silent alias/no-op is caught loudly.
+        assert!(!request_model_matches(
+            "deepseek-v4-flash",
+            "claude-opus-4-6"
+        ));
+        assert!(!request_model_matches(
+            "claude-api:claude-fable-5",
+            "claude-opus-4-6"
+        ));
+    }
+}
