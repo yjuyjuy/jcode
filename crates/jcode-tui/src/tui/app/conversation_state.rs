@@ -10,6 +10,25 @@ impl App {
         self.replace_provider_messages(provider_messages);
     }
 
+    /// Re-resolve the context limit after a credential/account change.
+    ///
+    /// Remote clients run an inert provider whose `context_window()` resolves
+    /// to the 200K default, so resetting to that value here would misreport
+    /// any 1M-window model (e.g. `claude-opus-4-8`) until a model change or
+    /// client restart: the account switch's follow-up catalog event carries
+    /// the same model, and `replace_remote_model_catalog_snapshot` only
+    /// re-resolves when the model differs. Resolve against the current
+    /// session model instead, which walks the same cache+catalog+config
+    /// precedence as model switches.
+    pub(super) fn refresh_context_limit_for_current_model(&mut self) {
+        if let Some(model) = self.remote_provider_model.clone() {
+            self.update_context_limit_for_model(&model);
+            return;
+        }
+        self.context_limit = self.provider.context_window() as u64;
+        self.context_warning_shown = false;
+    }
+
     pub(super) fn materialized_provider_messages(&self) -> Vec<Message> {
         if self.is_remote || !self.messages.is_empty() {
             self.messages.clone()

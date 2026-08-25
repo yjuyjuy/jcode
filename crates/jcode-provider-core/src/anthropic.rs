@@ -134,10 +134,11 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
         return false;
     };
     match family {
-        // Opus/Sonnet 3.x-4.8 and Sonnet 5 were probed with raw long-context
-        // requests on a live subscription.
+        // Opus/Sonnet 3.x-4.8, Sonnet 5, and Fable 5 were probed with raw
+        // long-context requests on a live subscription.
         Some("opus") => version <= (4, 8),
         Some("sonnet") => version <= (5, 0),
+        Some("fable") => version <= (5, 0),
         Some("haiku") => version <= (4, 5),
         _ => false,
     }
@@ -459,6 +460,23 @@ mod tests {
     fn stainless_labels_are_non_empty() {
         assert!(!anthropic_stainless_arch().is_empty());
         assert!(!anthropic_stainless_os().is_empty());
+    }
+
+    #[test]
+    fn fable_5_is_verified_native_1m() {
+        // claude-fable-5's native 1M window is verified (not just the
+        // optimistic default for version-5 generations), so its classification
+        // must beat a stale cached catalog limit in the full resolution path.
+        assert_eq!(
+            anthropic_context_mode("claude-fable-5"),
+            AnthropicContextMode::Native1M
+        );
+        assert!(anthropic_context_mode_is_verified("claude-fable-5"));
+        assert!(anthropic_context_mode_is_verified("claude-opus-4-8"));
+        // Unprobed future generations stay optimistic (unverified) so a
+        // live catalog limit can still override them.
+        assert!(!anthropic_context_mode_is_verified("claude-fable-6"));
+        assert!(!anthropic_context_mode_is_verified("claude-haiku-5"));
     }
 
     #[test]

@@ -71,6 +71,15 @@ adopted on the session's next turn and never interrupts a running turn; when a
 turn holds the agent lock, the switch is deferred and applied on drain. The
 end-to-end smoke test is `scripts/asw_session_control_e2e.sh`.
 
+After an account switch the TUI client must refresh the footer's context limit
+through `App::refresh_context_limit_for_current_model`
+(`crates/jcode-tui/src/tui/app/model_context.rs`), which re-resolves the live
+session model. Never write `provider.context_window()` there: remote clients run
+an inert provider whose window is the 200K default, and the follow-up catalog
+event carries the same model, so the latch would stick (footers misreporting
+1M-window models as 200K until restart). Same rule for the model-switch path:
+`update_context_limit_for_model` is the only correct writer.
+
 ## Pre-compact flow
 
 `[compaction] pre_compact_action` and `blocking_compact` (both opt-in) live in
