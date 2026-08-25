@@ -1542,6 +1542,18 @@ pub struct SessionControlInfo {
     pub account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Reasoning effort the session's active provider will use for the next
+    /// request, or `None` when the provider has no notion of effort (or none is
+    /// configured). Additive field: an older client/daemon that predates it
+    /// simply omits it, so the wire stays back-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Size of the session's stored record, in bytes: a cheap, monotonic proxy
+    /// for how much conversation the session holds (the same measure as
+    /// `SessionInfo.transcript_bytes` in the harness API). `None` when the
+    /// daemon could not stat the record. Additive and back-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_bytes: Option<u64>,
     /// True when a turn is currently running for this session. A switch is still
     /// accepted; it is adopted on the next turn (drain semantics).
     #[serde(default)]

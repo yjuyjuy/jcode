@@ -411,6 +411,7 @@ mod tests {
             usage_info: None,
             tokens_per_second: None,
             provider_name: None,
+            account_label: None,
             auth_method: crate::tui::info_widget::AuthMethod::Unknown,
             upstream_provider: None,
             connection_type: None,

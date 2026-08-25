@@ -1971,6 +1971,18 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         ));
     }
 
+    // Account name for THIS session, shown next to the provider so the running
+    // session's account is visible in the scroll-region status strip too.
+    if let Some(account) = data.account_label.as_deref().filter(|a| !a.is_empty()) {
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
+        spans.push(Span::styled(
+            format!("@{account}"),
+            Style::default().fg(rgb(180, 200, 150)),
+        ));
+    }
+
     // Access method (auth)
     if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
         if !spans.is_empty() {

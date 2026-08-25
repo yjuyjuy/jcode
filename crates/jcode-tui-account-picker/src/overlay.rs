@@ -796,13 +796,36 @@ impl AccountPicker {
             .as_deref()
             .unwrap_or("provider default");
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("Defaults ", Style::default().fg(MUTED_DARK)),
             Span::styled("provider ", Style::default().fg(MUTED_DARK)),
             Span::styled(provider.to_string(), Style::default().fg(Color::White)),
             Span::styled("  -  model ", Style::default().fg(MUTED_DARK)),
             Span::styled(model.to_string(), Style::default().fg(Color::White)),
-        ])
+        ];
+
+        // Name THIS session's account so the floating box reflects the running
+        // session's identity, not only the global defaults. An explicit
+        // "(default)" placeholder covers the no-named-account case so the field
+        // is never blank; a followed-global label is tagged so it is not read as
+        // a per-session pin.
+        let (account_label, account_style) = match summary.session_account.as_deref() {
+            Some(label) if summary.session_account_pinned => {
+                (label.to_string(), Style::default().fg(Color::White).bold())
+            }
+            Some(label) => (
+                format!("{label} (global)"),
+                Style::default().fg(Color::White),
+            ),
+            None => ("(default)".to_string(), Style::default().fg(MUTED)),
+        };
+        spans.push(Span::styled(
+            "  -  account ",
+            Style::default().fg(MUTED_DARK),
+        ));
+        spans.push(Span::styled(account_label, account_style));
+
+        Line::from(spans)
     }
 }
 
@@ -852,6 +875,84 @@ fn estimate_summary_bytes(summary: &AccountPickerSummary) -> usize {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+    fn buffer_to_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn render_summary_text(summary: AccountPickerSummary) -> String {
+        let mut picker = AccountPicker::with_summary(
+            " Accounts ",
+            vec![AccountPickerItem::action(
+                "claude",
+                "Claude",
+                "Switch account `work`",
+                "a@example.com - valid - active",
+                AccountPickerCommand::SubmitInput("/account claude switch work".to_string()),
+            )],
+            summary,
+        );
+        let backend = TestBackend::new(140, 46);
+        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|frame| picker.render(frame))
+            .expect("draw failed");
+        buffer_to_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn account_box_shows_pinned_session_account_label() {
+        // A per-session pin must surface the concrete account name in the box.
+        let text = render_summary_text(AccountPickerSummary {
+            provider_count: 1,
+            session_account: Some("claude-2".to_string()),
+            session_account_pinned: true,
+            ..Default::default()
+        });
+        assert!(
+            text.contains("account") && text.contains("claude-2"),
+            "account box should name the pinned session account; rendered:\n{text}"
+        );
+    }
+
+    #[test]
+    fn account_box_marks_followed_global_account() {
+        // Following the process-global account still shows a concrete name, but
+        // tagged so it is not read as a per-session pin.
+        let text = render_summary_text(AccountPickerSummary {
+            provider_count: 1,
+            session_account: Some("claude-1".to_string()),
+            session_account_pinned: false,
+            ..Default::default()
+        });
+        assert!(
+            text.contains("claude-1") && text.contains("global"),
+            "followed-global account should be labeled; rendered:\n{text}"
+        );
+    }
+
+    #[test]
+    fn account_box_uses_explicit_placeholder_when_no_account() {
+        // No named account: the field is an explicit placeholder, never blank.
+        let text = render_summary_text(AccountPickerSummary {
+            provider_count: 1,
+            session_account: None,
+            session_account_pinned: false,
+            ..Default::default()
+        });
+        assert!(
+            text.contains("account") && text.contains("(default)"),
+            "account box should show an explicit fallback; rendered:\n{text}"
+        );
+    }
 
     #[test]
     fn test_account_picker_preserves_underlying_background_outside_panels() {

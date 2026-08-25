@@ -59,6 +59,15 @@ struct SessionListRow {
     account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// Reasoning effort the session's active provider will use next, when the
+    /// provider exposes effort. Omitted from JSON when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    /// Context-size proxy: bytes of the session's stored record. Named
+    /// `context_bytes` (not a raw `transcript_bytes`) so the JSON reader knows
+    /// the unit is bytes, not tokens. Omitted when the daemon could not stat it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_bytes: Option<u64>,
     is_processing: bool,
 }
 
@@ -76,6 +85,8 @@ pub async fn run_session_list_command(json: bool) -> Result<()> {
             provider: info.provider,
             account: info.account,
             model: info.model,
+            effort: info.effort,
+            context_bytes: info.transcript_bytes,
             is_processing: info.is_processing,
         })
         .collect();
@@ -95,13 +106,36 @@ pub async fn run_session_list_command(json: bool) -> Result<()> {
         let provider = row.provider.as_deref().unwrap_or("?");
         let account = row.account.as_deref().unwrap_or("(default)");
         let model = row.model.as_deref().unwrap_or("?");
+        let effort = row.effort.as_deref().unwrap_or("-");
+        // Label the unit inline (e.g. "12.3KB") so a bytes proxy is never
+        // mistaken for a token count in this one-line-per-session health view.
+        let context = row
+            .context_bytes
+            .map(format_context_bytes)
+            .unwrap_or_else(|| "-".to_string());
         let busy = if row.is_processing { " [busy]" } else { "" };
         println!(
-            "{} ({})  provider={} account={} model={}{}",
-            row.session_id, name, provider, account, model, busy
+            "{} ({})  provider={} account={} model={} effort={} context={}{}",
+            row.session_id, name, provider, account, model, effort, context, busy
         );
     }
     Ok(())
+}
+
+/// Format a byte count as a compact, unit-labeled string for the `session list`
+/// context column (e.g. `48B`, `12.3KB`, `4.7MB`). The `B` suffix makes the
+/// unit unambiguous so the readout is never confused with a token total.
+fn format_context_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes_f >= MB {
+        format!("{:.1}MB", bytes_f / MB)
+    } else if bytes_f >= KB {
+        format!("{:.1}KB", bytes_f / KB)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 /// `jcode session switch-account`: switch a live session's account, optionally
@@ -613,5 +647,16 @@ mod tests {
             "claude-api:claude-fable-5",
             "claude-opus-4-6"
         ));
+    }
+
+    #[test]
+    fn format_context_bytes_labels_unit_at_each_scale() {
+        // The health view's context column is a bytes proxy, so the unit is
+        // always spelled out (B/KB/MB) to keep it from reading as a token count.
+        assert_eq!(format_context_bytes(0), "0B");
+        assert_eq!(format_context_bytes(512), "512B");
+        assert_eq!(format_context_bytes(1024), "1.0KB");
+        assert_eq!(format_context_bytes(12_600), "12.3KB");
+        assert_eq!(format_context_bytes(5_242_880), "5.0MB");
     }
 }

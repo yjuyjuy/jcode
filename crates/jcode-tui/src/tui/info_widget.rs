@@ -627,6 +627,11 @@ pub struct InfoWidgetData {
     pub tokens_per_second: Option<f32>,
     /// Active provider name (openrouter/openai/anthropic/...)
     pub provider_name: Option<String>,
+    /// Account label THIS session's active provider is using, shown in the
+    /// overscroll status strip next to the provider so the running session's
+    /// account is visible there too. `None` when the provider has no named
+    /// account (or the session is remote); the renderer then omits it.
+    pub account_label: Option<String>,
     /// Authentication method used to access the model
     pub auth_method: AuthMethod,
     /// Upstream provider (e.g., which OpenRouter provider served the request: fireworks, etc.)
