@@ -1261,8 +1261,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 .map(Duration::from_secs)
                 .or_else(|| parse_rate_limit_error(&message))
                 .or_else(|| {
-                    looks_like_rate_limit
-                        .then(|| Duration::from_secs(RATE_LIMIT_DEFAULT_HOLD_SECS))
+                    looks_like_rate_limit.then(|| Duration::from_secs(RATE_LIMIT_DEFAULT_HOLD_SECS))
                 });
             if let Some(reset_duration) = reset_duration {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);

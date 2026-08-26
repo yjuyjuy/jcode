@@ -2142,8 +2142,7 @@ fn terminal_rate_limit_prefers_retry_after_header() {
         retry_after,
     );
 
-    let secs =
-        rate_limit_retry_after_secs(&error).expect("a 429 with a header must yield a hint");
+    let secs = rate_limit_retry_after_secs(&error).expect("a 429 with a header must yield a hint");
     assert!(
         secs > 0 && secs <= 7,
         "expected the header-derived hint (<=7s), got {secs}"
