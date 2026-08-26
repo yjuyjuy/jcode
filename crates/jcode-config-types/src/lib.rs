@@ -445,6 +445,24 @@ pub struct CompactionConfig {
     /// compaction and continuing. The emergency hard-compact path (context-limit
     /// recovery) is never affected by this flag. Default: false.
     pub blocking_compact: bool,
+
+    /// Absolute token count at which auto-compaction is triggered (the
+    /// proactive/soft threshold).
+    ///
+    /// When unset (`None`), the soft trigger fires at the historical default of
+    /// `0.80 * token_budget` (160k tokens for the 200k default budget). When set,
+    /// the trigger fires once effective context tokens reach this absolute count
+    /// instead, letting operators push auto-compaction later (or earlier) than the
+    /// 80% derivation.
+    ///
+    /// The value is clamped to stay below the critical hard-compact threshold
+    /// (`0.95 * token_budget`) so the emergency context-limit recovery path is
+    /// never preempted; a configured value above that ceiling is clamped down and
+    /// logged. Default: unset (preserves today's `0.80 * token_budget` behavior).
+    ///
+    /// Env override: `JCODE_AUTO_COMPACT_THRESHOLD_TOKENS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold_tokens: Option<usize>,
 }
 
 impl Default for CompactionConfig {
@@ -462,6 +480,7 @@ impl Default for CompactionConfig {
             goal_window_turns: 5,
             pre_compact_action: None,
             blocking_compact: false,
+            auto_compact_threshold_tokens: None,
         }
     }
 }

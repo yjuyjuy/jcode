@@ -636,6 +636,19 @@ swarm_max_concurrent_agents = 32
 # affected by this flag. Default: false.
 # Env override: JCODE_BLOCKING_COMPACT (true/false).
 blocking_compact = false
+#
+# Auto-compact threshold (tokens): the absolute effective-context token count at
+# which proactive/soft auto-compaction triggers. When unset, the soft trigger
+# fires at the historical default of 0.80 * token_budget (160000 tokens for the
+# 200000 default budget). Setting an absolute token count makes the trigger fire
+# at that many effective context tokens instead, letting you push auto-compaction
+# later (or earlier) than the 80% derivation. The value is clamped to stay below
+# the critical hard-compact ceiling (0.95 * token_budget) so emergency
+# context-limit recovery is never preempted. The shipped default of 200000 (the
+# full default context window) pushes auto-compaction as late as possible; comment
+# it out to restore the 0.80 * budget behavior.
+# Env override: JCODE_AUTO_COMPACT_THRESHOLD_TOKENS (set empty to restore default).
+auto_compact_threshold_tokens = 200000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
@@ -790,6 +803,13 @@ mod tests {
         assert!(
             template.contains("blocking_compact"),
             "the template should document blocking_compact"
+        );
+        let parsed: Config =
+            toml::from_str(&template).expect("the shipped config template must parse");
+        assert_eq!(
+            parsed.compaction.auto_compact_threshold_tokens,
+            Some(200000),
+            "the template should ship an active auto_compact_threshold_tokens = 200000 default"
         );
     }
 
