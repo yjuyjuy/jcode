@@ -36,6 +36,16 @@ empty prompt.
 
 This replaces only the base prompt. AGENTS.md, overlays, skills, and memory still apply.
 
+## Suppressing AGENTS.md
+
+Set `JCODE_NO_AGENTS_MD=1` to skip loading both the project `./AGENTS.md` and the
+global `~/AGENTS.md` entirely, before the files are even checked for existence.
+Truthy values are `1`, `true`, `on`, and `yes` (case-insensitive); `0`, `false`,
+`off`, `no` (case-insensitive), an empty value, or an unset variable keep normal
+behavior. While the knob is active, `ContextInfo.has_project_agents_md` and
+`has_global_agents_md` stay `false`. This is useful when an external gate tool
+launches jcode inside a checkout whose AGENTS.md must not govern the agent.
+
 ## Notes
 
 - Changes to these files take effect for **new sessions**; a running session keeps the

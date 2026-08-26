@@ -208,6 +208,11 @@ pub struct CompactionManager {
 
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
+
+    /// One-shot guard so the "configured threshold exceeds critical ceiling"
+    /// clamp is logged at most once per budget rather than on every per-turn
+    /// `soft_threshold_tokens()` read.
+    clamp_log_emitted: std::sync::atomic::AtomicBool,
 }
 
 impl CompactionManager {
@@ -234,6 +239,7 @@ impl CompactionManager {
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
             semantic_embed_cache: HashMap::with_capacity(SEMANTIC_EMBED_CACHE_CAPACITY),
             semantic_embed_cache_counter: 0,
+            clamp_log_emitted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -256,6 +262,12 @@ impl CompactionManager {
     #[cfg(test)]
     pub fn with_blocking_compact(mut self, blocking: bool) -> Self {
         self.compaction_config.blocking_compact = blocking;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_auto_compact_threshold_tokens(mut self, tokens: Option<usize>) -> Self {
+        self.compaction_config.auto_compact_threshold_tokens = tokens;
         self
     }
 
@@ -305,12 +317,61 @@ impl CompactionManager {
 
     /// Update the token budget (e.g., when model changes)
     pub fn set_budget(&mut self, budget: usize) {
+        if budget != self.token_budget {
+            self.clamp_log_emitted
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         self.token_budget = budget;
     }
 
     /// Get current token budget
     pub fn token_budget(&self) -> usize {
         self.token_budget
+    }
+
+    /// The soft/proactive auto-compaction threshold, expressed in absolute
+    /// tokens.
+    ///
+    /// When `[compaction] auto_compact_threshold_tokens` is unset this returns
+    /// the historical default of `COMPACTION_THRESHOLD * token_budget`
+    /// (0.80 * budget). When it is set, that absolute token count drives the
+    /// trigger instead, but it is clamped to stay strictly below the critical
+    /// hard-compact ceiling (`CRITICAL_THRESHOLD * token_budget`) so the
+    /// emergency context-limit recovery path is never preempted. A configured
+    /// value at or above that ceiling is clamped down and logged.
+    pub fn soft_threshold_tokens(&self) -> f64 {
+        let budget = self.token_budget as f64;
+        let default_threshold = COMPACTION_THRESHOLD as f64 * budget;
+        let Some(configured) = self.compaction_config.auto_compact_threshold_tokens else {
+            return default_threshold;
+        };
+        let configured = configured as f64;
+        // Keep the soft trigger strictly below the hard-compact ceiling so the
+        // emergency recovery path still owns everything at/above it. Leave a
+        // one-token margin so an equal value still fires softly first.
+        let ceiling = (CRITICAL_THRESHOLD as f64 * budget - 1.0).max(0.0);
+        if configured > ceiling {
+            if !self
+                .clamp_log_emitted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                crate::logging::info(&format!(
+                    "[compaction] auto_compact_threshold_tokens={:.0} exceeds critical ceiling {:.0} (budget={:.0}); clamping to ceiling",
+                    configured, ceiling, budget
+                ));
+            }
+            return ceiling;
+        }
+        configured
+    }
+
+    /// The soft/proactive auto-compaction threshold as a fraction of the token
+    /// budget (0.0-1.0), derived from [`Self::soft_threshold_tokens`].
+    fn soft_threshold_fraction(&self) -> f32 {
+        if self.token_budget == 0 {
+            return COMPACTION_THRESHOLD;
+        }
+        (self.soft_threshold_tokens() / self.token_budget as f64) as f32
     }
 
     /// Notify the manager that a message was added.
@@ -580,8 +641,7 @@ impl CompactionManager {
         }
 
         let cfg = &self.compaction_config;
-        let budget = self.token_budget as f64;
-        let threshold = COMPACTION_THRESHOLD as f64 * budget;
+        let threshold = self.soft_threshold_tokens();
 
         // Compute EWMA of per-turn token deltas.
         // We need at least 2 snapshots to get a delta.
@@ -907,7 +967,7 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && self.context_usage_with(all_messages) >= self.soft_threshold_fraction()
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {

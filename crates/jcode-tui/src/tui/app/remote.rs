@@ -2,7 +2,7 @@
 
 use super::{
     App, DisplayMessage, PendingReloadReconnectStatus, ProcessingStatus, RemoteResumeActivity,
-    SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
+    SendAction, ctrl_bracket_fallback_to_esc, input,
     remote_notifications::present_swarm_notification, spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 mod input_dispatch;
 mod key_handling;
 mod queue_recovery;
+mod rate_limit_hold;
 mod reconnect;
 mod server_event_handlers;
 mod server_events;

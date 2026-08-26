@@ -483,6 +483,16 @@ impl Config {
         {
             self.compaction.blocking_compact = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS") {
+            let trimmed = v.trim();
+            // An explicitly empty env value clears a config-file threshold,
+            // restoring the default 0.80 * budget behavior.
+            if trimmed.is_empty() {
+                self.compaction.auto_compact_threshold_tokens = None;
+            } else if let Ok(parsed) = trimmed.parse::<usize>() {
+                self.compaction.auto_compact_threshold_tokens = Some(parsed);
+            }
+        }
 
         // Web search
         if let Ok(v) = std::env::var("JCODE_WEBSEARCH_ENGINE")

@@ -233,6 +233,128 @@ fn agents_md_symlink_alias_is_deduplicated_by_canonical_file_path() {
     assert_eq!(content.matches("symlinked instructions").count(), 1);
 }
 
+/// Sets or unsets JCODE_NO_AGENTS_MD for the duration of a test, restoring the
+/// previous value on drop. Serialized via the shared test env lock.
+struct NoAgentsMdEnvGuard {
+    _env_guard: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl NoAgentsMdEnvGuard {
+    fn set(value: &str) -> Self {
+        let env_guard = crate::storage::lock_test_env();
+        let previous = std::env::var_os("JCODE_NO_AGENTS_MD");
+        crate::env::set_var("JCODE_NO_AGENTS_MD", value);
+        Self {
+            _env_guard: env_guard,
+            previous,
+        }
+    }
+
+    fn remove() -> Self {
+        let env_guard = crate::storage::lock_test_env();
+        let previous = std::env::var_os("JCODE_NO_AGENTS_MD");
+        crate::env::remove_var("JCODE_NO_AGENTS_MD");
+        Self {
+            _env_guard: env_guard,
+            previous,
+        }
+    }
+}
+
+impl Drop for NoAgentsMdEnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(previous) => crate::env::set_var("JCODE_NO_AGENTS_MD", previous),
+            None => crate::env::remove_var("JCODE_NO_AGENTS_MD"),
+        }
+    }
+}
+
+#[test]
+fn no_agents_md_truthy_forms_suppress_project_and_global_agents_md() {
+    for value in ["1", "true", "TRUE", "on", "yes"] {
+        let _guard = NoAgentsMdEnvGuard::set(value);
+
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let global_dir = tempfile::TempDir::new().unwrap();
+        let global_agents_md = global_dir.path().join("AGENTS.md");
+        std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+        std::fs::write(&global_agents_md, "global instructions").unwrap();
+
+        let (content, info) =
+            load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+
+        assert!(
+            content.is_none(),
+            "JCODE_NO_AGENTS_MD={value} loaded AGENTS.md"
+        );
+        assert!(!info.has_project_agents_md);
+        assert!(!info.has_global_agents_md);
+        assert_eq!(info.project_agents_md_chars, 0);
+        assert_eq!(info.global_agents_md_chars, 0);
+    }
+}
+
+#[test]
+fn no_agents_md_disabling_forms_keep_project_and_global_agents_md() {
+    for value in ["0", "false", "off", "no", ""] {
+        let _guard = NoAgentsMdEnvGuard::set(value);
+
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let global_dir = tempfile::TempDir::new().unwrap();
+        let global_agents_md = global_dir.path().join("AGENTS.md");
+        std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+        std::fs::write(&global_agents_md, "global instructions").unwrap();
+
+        let (content, info) =
+            load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+
+        let content = content.expect("JCODE_NO_AGENTS_MD={value} suppressed AGENTS.md");
+        assert!(info.has_project_agents_md);
+        assert!(info.has_global_agents_md);
+        assert!(content.contains("project instructions"));
+        assert!(content.contains("global instructions"));
+    }
+}
+
+#[test]
+fn no_agents_md_suppression_is_honored_by_both_prompt_builders() {
+    let _guard = NoAgentsMdEnvGuard::set("1");
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        project_dir.path().join("AGENTS.md"),
+        "SENTINEL-PROJECT-INSTRUCTIONS",
+    )
+    .unwrap();
+    let working_dir = Some(project_dir.path());
+
+    let (full, full_info) = build_system_prompt_full(None, &[], false, None, working_dir);
+    let (split, split_info) = build_system_prompt_split(None, &[], false, None, working_dir);
+
+    assert!(!full.contains("SENTINEL-PROJECT-INSTRUCTIONS"));
+    assert!(!split.static_part.contains("SENTINEL-PROJECT-INSTRUCTIONS"));
+    assert!(!full_info.has_project_agents_md);
+    assert!(!split_info.has_project_agents_md);
+    assert_eq!(full_info.project_agents_md_chars, 0);
+    assert_eq!(split_info.project_agents_md_chars, 0);
+}
+
+#[test]
+fn no_agents_md_unset_loads_project_agents_md_normally() {
+    let _guard = NoAgentsMdEnvGuard::remove();
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let content = content.expect("AGENTS.md should load when the env var is unset");
+
+    assert!(info.has_project_agents_md);
+    assert!(content.contains("project instructions"));
+}
+
 #[test]
 fn test_session_context_includes_time_timezone_and_system_info() {
     let context = build_session_context(None);

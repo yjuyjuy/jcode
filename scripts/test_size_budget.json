@@ -9,7 +9,7 @@
     "crates/jcode-app-core/src/tool/communicate_tests.rs": 1819,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1440,
     "crates/jcode-app-core/src/tool/tests.rs": 1586,
-    "crates/jcode-base/src/compaction_tests.rs": 1216,
+    "crates/jcode-base/src/compaction_tests.rs": 1348,
     "crates/jcode-base/src/config_tests.rs": 1421,
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests/model_resolution.rs": 2435,

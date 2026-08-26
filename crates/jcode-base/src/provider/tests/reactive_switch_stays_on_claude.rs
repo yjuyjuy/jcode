@@ -180,3 +180,63 @@ fn reactive_429_stays_on_healthy_claude_sibling_without_cross_provider_prompt() 
         clear_all_provider_unavailability_for_account();
     });
 }
+
+// Regression: the mid-turn reactive 429 switch must mark ONLY the exhausted
+// account it is leaving, keyed by that account's label. The healthy sibling to
+// which the override moves must never carry the mark, and the switch reason
+// must not surface on the provider while the sibling is current: the next
+// failover pass then attempts the sibling directly instead of proposing a
+// cross-provider switch (a ~140k-token resend to OpenAI).
+//
+// Before this fix the mark was recorded with the provider argument resolved
+// against whichever account happened to be current at record time, so a
+// reordering or scope change could poison the healthy sibling (or the whole
+// provider) and drive the next failover pass to OpenAI.
+#[test]
+fn reactive_switch_marks_only_the_exhausted_account() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+
+        // The fleet state that produced the bug: claude-2 drained and active,
+        // claude-1 healthy.
+        save_two_claude_accounts("claude-2");
+        crate::usage::seed_anthropic_account_usage_for_tests("claude-2", 1.0, 1.0);
+        crate::usage::seed_anthropic_account_usage_for_tests("claude-1", 0.07, 0.10);
+
+        // A 429 on the active account triggers the reactive switch to the
+        // sibling with the most headroom.
+        let switched = reactive_switch_on_rate_limit(ActiveProvider::Claude);
+        assert_eq!(
+            switched.as_deref(),
+            Some("claude-1"),
+            "must switch to the healthy sibling"
+        );
+        assert_eq!(
+            crate::auth::claude::active_account_label().as_deref(),
+            Some("claude-1"),
+            "the active-account override must now point at the sibling"
+        );
+
+        // The mark must be scoped to the exhausted account: invisible while the
+        // healthy sibling is current...
+        assert!(
+            provider_unavailability_detail_for_account("claude").is_none(),
+            "a healthy current sibling must not look like an unavailable provider"
+        );
+        assert!(
+            provider_unavailability_detail_for_account_label("claude", "claude-1").is_none(),
+            "the healthy sibling must not carry the reactive 429 mark"
+        );
+        // ...and present on the drained account it was recorded for, so the
+        // between-turns selection routes around that one account only.
+        assert!(
+            provider_unavailability_detail_for_account_label("claude", "claude-2").is_some(),
+            "the exhausted account must carry the reactive 429 mark"
+        );
+
+        // Clean up the process-global override for the next test.
+        crate::auth::claude::set_active_account_override(None);
+        clear_all_provider_unavailability_for_account();
+    });
+}

@@ -1214,3 +1214,135 @@ async fn test_background_compaction_does_not_start_while_pre_compact_action_runs
         "compaction must start once the pre-compact action finishes"
     );
 }
+
+// ── Configurable auto-compact threshold (auto_compact_threshold_tokens) ──────
+
+/// With the threshold unset, the reactive soft trigger must still fire at the
+/// historical 0.80 * budget default (160k on the 200k default budget), not one
+/// token earlier or later.
+#[test]
+fn test_soft_threshold_default_is_eighty_percent_of_budget() {
+    let manager = CompactionManager::new().with_budget(200_000);
+    let threshold = manager.soft_threshold_tokens();
+    assert!(
+        (threshold - 160_000.0).abs() < 1.0,
+        "unset threshold must derive 0.80 * budget = 160000, got {threshold}"
+    );
+}
+
+/// A configured absolute token threshold must drive the reactive trigger:
+/// below it does not compact, at/above it does.
+#[test]
+fn test_configured_token_threshold_drives_reactive_trigger() {
+    let make = || {
+        let mut manager = CompactionManager::new()
+            .with_budget(200_000)
+            .with_auto_compact_threshold_tokens(Some(180_000));
+        manager.set_mode(crate::config::CompactionMode::Reactive);
+        let mut messages = Vec::new();
+        for _ in 0..12 {
+            messages.push(make_text_message(Role::User, "x"));
+            manager.notify_message_added();
+        }
+        (manager, messages)
+    };
+
+    // 170k observed tokens: below the 180k configured threshold (and below the
+    // 160k default would have tripped) -> must NOT compact.
+    let (mut manager, messages) = make();
+    manager.update_observed_input_tokens(170_000);
+    assert!(
+        !manager.should_compact_with(&messages),
+        "170k observed must not trip a 180k configured threshold"
+    );
+
+    // 185k observed tokens: at/above the 180k configured threshold -> compact.
+    let (mut manager, messages) = make();
+    manager.update_observed_input_tokens(185_000);
+    assert!(
+        manager.should_compact_with(&messages),
+        "185k observed must trip a 180k configured threshold"
+    );
+}
+
+/// The default (unset) behavior must be unchanged: 155k below 160k does not
+/// compact, 165k above 160k does.
+#[test]
+fn test_unset_threshold_preserves_default_trigger_point() {
+    let make = || {
+        let mut manager = CompactionManager::new().with_budget(200_000);
+        manager.set_mode(crate::config::CompactionMode::Reactive);
+        let mut messages = Vec::new();
+        for _ in 0..12 {
+            messages.push(make_text_message(Role::User, "x"));
+            manager.notify_message_added();
+        }
+        (manager, messages)
+    };
+
+    let (mut manager, messages) = make();
+    manager.update_observed_input_tokens(155_000);
+    assert!(
+        !manager.should_compact_with(&messages),
+        "155k observed is below the default 160k trigger"
+    );
+
+    let (mut manager, messages) = make();
+    manager.update_observed_input_tokens(165_000);
+    assert!(
+        manager.should_compact_with(&messages),
+        "165k observed is above the default 160k trigger"
+    );
+}
+
+/// A configured value at/above the critical ceiling is clamped strictly below
+/// it so the emergency hard-compact path is never preempted.
+#[test]
+fn test_configured_threshold_clamped_below_critical_ceiling() {
+    // 200k threshold on a 200k budget would sit at 100% usage, past the 0.95
+    // critical ceiling. It must clamp below 190k (0.95 * 200000).
+    let manager = CompactionManager::new()
+        .with_budget(200_000)
+        .with_auto_compact_threshold_tokens(Some(200_000));
+    let threshold = manager.soft_threshold_tokens();
+    let ceiling = CRITICAL_THRESHOLD as f64 * 200_000.0;
+    assert!(
+        threshold < ceiling,
+        "clamped soft threshold {threshold} must stay below critical ceiling {ceiling}"
+    );
+    assert!(
+        threshold >= ceiling - 2.0,
+        "clamp should land just below the ceiling, got {threshold}"
+    );
+}
+
+/// The env override JCODE_AUTO_COMPACT_THRESHOLD_TOKENS parses into the config.
+#[test]
+fn test_env_override_parses_auto_compact_threshold() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS");
+
+    crate::env::set_var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS", "175000");
+    let mut cfg = crate::config::Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(
+        cfg.compaction.auto_compact_threshold_tokens,
+        Some(175_000),
+        "env override must parse an absolute token count into the config"
+    );
+
+    // An explicitly empty value clears any prior threshold.
+    crate::env::set_var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS", "");
+    let mut cfg = crate::config::Config::default();
+    cfg.compaction.auto_compact_threshold_tokens = Some(123_456);
+    cfg.apply_env_overrides();
+    assert_eq!(
+        cfg.compaction.auto_compact_threshold_tokens, None,
+        "an empty env value must clear the configured threshold"
+    );
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS", value),
+        None => crate::env::remove_var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS"),
+    }
+}
