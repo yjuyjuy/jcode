@@ -1,8 +1,13 @@
 use super::*;
+#[path = "session_account.rs"]
+mod session_account;
+#[path = "swarm_subtree.rs"]
+mod swarm_subtree;
 use crate::tui::TuiState as _;
 use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
+pub(crate) use swarm_subtree::filter_inline_swarm_subtree;
 
 const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
 
@@ -2003,50 +2008,6 @@ pub(crate) enum SwarmPanelView {
 }
 
 impl App {
-    /// The account label to display for THIS session in account surfaces (the
-    /// floating account box and the overscroll status line).
-    ///
-    /// Returns the session's per-instance account pin when the live provider is
-    /// pinned to one (ADR 0031). When the session follows the process-global
-    /// active account (no pin), resolves that global active label for the active
-    /// provider so the surface shows a concrete name (e.g. `claude-2`) instead of
-    /// nothing. Providers without multiple accounts, and remote sessions (whose
-    /// account identity is not carried to this client), return `None`; the caller
-    /// then renders an explicit non-empty placeholder rather than a blank.
-    ///
-    /// Pair with [`App::session_account_is_pinned`] to distinguish a pinned label
-    /// from a followed-global one in the display.
-    pub(crate) fn session_account_label(&self) -> Option<String> {
-        // Remote sessions run an inert local provider whose account_label would
-        // read this host's auth.json, which is not the remote session's account.
-        // Report nothing rather than a misleading local label.
-        if self.is_remote {
-            return None;
-        }
-        if let Some(pinned) = self.provider.account_label() {
-            return Some(pinned);
-        }
-        // No pin: fall back to the resolved process-global active account for the
-        // active provider so the label is never blank when an account exists.
-        // Only Anthropic and OpenAI support multiple named accounts today.
-        match self.provider.name() {
-            name if name.eq_ignore_ascii_case("Claude") => {
-                crate::auth::claude::active_account_label()
-            }
-            name if name.eq_ignore_ascii_case("OpenAI") => {
-                crate::auth::codex::active_account_label()
-            }
-            _ => None,
-        }
-    }
-
-    /// Whether [`App::session_account_label`] is a per-session pin (true) rather
-    /// than the followed process-global active account (false). Used to mark the
-    /// followed-global case explicitly in account surfaces.
-    pub(crate) fn session_account_is_pinned(&self) -> bool {
-        !self.is_remote && self.provider.account_label().is_some()
-    }
-
     /// Cycle chat → inline controls → full live swarm page → chat.
     pub(crate) fn cycle_swarm_panel_view(&mut self) -> SwarmPanelView {
         if !self.inline_swarm_gallery_active() {
@@ -2218,59 +2179,6 @@ pub(crate) fn swarm_panel_action_for_key(
             _ => None,
         },
     }
-}
-
-/// Restrict swarm members to the descendants `self_id` actually spawned: every
-/// member whose `report_back_to_session_id` chain reaches `self_id`, *excluding*
-/// `self_id` itself.
-///
-/// This keeps the inline swarm strip scoped to the agents a session manages,
-/// without listing the viewing session as one of "its" agents and without
-/// showing unrelated members that merely share the swarm (e.g. other sessions in
-/// the same repository).
-///
-/// Returns empty when the session has not spawned anyone, which the caller uses
-/// to hide the strip entirely.
-pub(crate) fn filter_inline_swarm_subtree(
-    members: &[crate::protocol::SwarmMemberStatus],
-    self_id: &str,
-) -> Vec<crate::protocol::SwarmMemberStatus> {
-    use std::collections::{HashMap, HashSet};
-
-    // Build the parent -> children index once, then walk outward from this
-    // session. The previous implementation rebuilt a cycle-detection HashSet
-    // while walking the parent chain for every member, on every frame. Large,
-    // long-lived swarms made that input render path needlessly expensive.
-    let mut children_by_parent: HashMap<&str, Vec<&str>> = HashMap::new();
-    for member in members {
-        if let Some(parent) = member.report_back_to_session_id.as_deref() {
-            children_by_parent
-                .entry(parent)
-                .or_default()
-                .push(member.session_id.as_str());
-        }
-    }
-
-    let mut descendants: HashSet<&str> = HashSet::new();
-    let mut pending = vec![self_id];
-    while let Some(parent) = pending.pop() {
-        let Some(children) = children_by_parent.get(parent) else {
-            continue;
-        };
-        for &child in children {
-            // This both excludes cycles and ensures each subtree node is
-            // expanded at most once.
-            if child != self_id && descendants.insert(child) {
-                pending.push(child);
-            }
-        }
-    }
-
-    members
-        .iter()
-        .filter(|m| descendants.contains(m.session_id.as_str()))
-        .cloned()
-        .collect()
 }
 
 #[cfg(test)]

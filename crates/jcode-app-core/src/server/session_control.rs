@@ -294,11 +294,14 @@ fn session_transcript_bytes(session_id: &str) -> Option<u64> {
     {
         return None;
     }
-    let path = crate::storage::jcode_dir()
-        .ok()?
-        .join("sessions")
-        .join(format!("{session_id}.json"));
-    std::fs::metadata(path).ok().map(|meta| meta.len())
+    let Ok(dir) = crate::storage::jcode_dir() else {
+        return None;
+    };
+    let path = dir.join("sessions").join(format!("{session_id}.json"));
+    match std::fs::metadata(path) {
+        Ok(meta) => Some(meta.len()),
+        Err(_) => None,
+    }
 }
 
 /// Collect every live session agent in the daemon, plus a snapshot of
