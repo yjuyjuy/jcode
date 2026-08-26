@@ -2836,8 +2836,6 @@ mod context_window;
 
 mod rate_limit_hold;
 use rate_limit_hold::is_rate_limit_error;
-#[cfg(test)]
-use rate_limit_hold::{RATE_LIMIT_BURST_FLOOR_SECS, rate_limit_retry_after_secs};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

@@ -744,3 +744,121 @@ fn remote_account_switch_without_catalog_keeps_existing_limit() {
     app.refresh_context_limit_for_current_model();
     assert_eq!(app.context_limit, before);
 }
+
+/// Highest-value regression lock for the 429 dead-turn bug.
+///
+/// The provider's terminal rate-limit error historically reached the client as
+/// `retry_after_secs: None` (a bare "Failed after 3 retries ... Rate limited").
+/// A normal user turn carries `auto_retry = false`, so the old handler fell
+/// through to `clear_pending_remote_retry()` and DROPPED the pending message:
+/// the session idled forever with the queued turn stranded.
+///
+/// Even with `retry_after_secs = None`, a rate-limit error must HOLD the pending
+/// message and schedule a resend, never drop it.
+#[test]
+fn test_rate_limit_without_retry_after_holds_pending_and_reschedules() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "do the thing".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        // A normal user send: auto_retry is false. This is the case the old
+        // handler dropped.
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        submission_nonce: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 42,
+            message: "Failed after 3 retries: Retryable stream error: {\"type\":\"error\",\
+                      \"error\":{\"details\":null,\"type\":\"rate_limit_error\",\
+                      \"message\":\"Rate limited\"},\
+                      \"request_id\":\"req_011CePo5oo3J2YdKatBNRNeD\"}"
+                .to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    // The turn must be HELD, not dropped.
+    assert!(
+        app.rate_limit_pending_message.is_some(),
+        "a rate-limit error must never drop the pending turn"
+    );
+    assert!(
+        app.rate_limit_reset.is_some(),
+        "a rate-limit hold must schedule a resend deadline"
+    );
+    // Back to idle so the tick-based resend can fire.
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Idle));
+    assert!(app.current_message_id.is_none());
+    // The user-facing error is still surfaced.
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("Rate limit")),
+        "the user should see a rate-limit hold notice"
+    );
+}
+
+/// A rate-limit error whose text carries no reset time and no retry_after_secs
+/// must still schedule a bounded (short) hold, not a garbage timer and not a
+/// drop. The bare Anthropic JSON error carries only a request_id, which must
+/// never drive the timer.
+#[test]
+fn test_bare_rate_limit_json_schedules_bounded_hold_not_drop() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "continue".to_string(),
+        images: vec![],
+        is_system: true,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        submission_nonce: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(43);
+
+    let before = std::time::Instant::now();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 43,
+            message: "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\
+                      \"message\":\"Rate limited\"},\"request_id\":\"req_3000\"}"
+                .to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    let reset = app
+        .rate_limit_reset
+        .expect("a bare rate-limit error must schedule a hold");
+    // The hold must be bounded (the request_id `req_3000` must NOT become a
+    // 3000s timer) and non-trivial.
+    let held_for = reset.saturating_duration_since(before);
+    assert!(
+        held_for <= std::time::Duration::from_secs(300),
+        "hold must be bounded, not driven by the request_id digits; got {held_for:?}"
+    );
+    assert!(app.rate_limit_pending_message.is_some());
+}
