@@ -24,6 +24,10 @@ concurrency:
 jobs:
   require-issue:
     name: Require Linked Issue
+    # This gate enforces upstream org policy on 1jehuang/jcode. The
+    # yjuyjuy/jcode fork tracks upstream but does not inherit the policy,
+    # so the job only runs on the upstream repo.
+    if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
