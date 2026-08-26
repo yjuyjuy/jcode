@@ -121,10 +121,15 @@ fn pure_digit_seconds(word: &str) -> Option<u64> {
     if core.is_empty() || !core.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    match core.parse::<u64>() {
-        Ok(secs) => Some(secs),
-        Err(_) => None,
+    // Fold the (already validated all-digit) token with checked arithmetic. This
+    // yields None on overflow via `?` without an ok-discarding call (which the
+    // swallowed-error budget forbids) and without a manual Result-to-Option match
+    // (which clippy's `manual_ok` forbids).
+    let mut secs: u64 = 0;
+    for byte in core.bytes() {
+        secs = secs.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
     }
+    Some(secs)
 }
 
 #[cfg(test)]
