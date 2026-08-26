@@ -16,11 +16,18 @@ mode            = "reactive"       # reactive | proactive | semantic
 # Pause the turn loop until pre-action + compaction both complete before the
 # next model call. Default: false (compaction continues in the background).
 # blocking_compact  = false
+# Absolute token count at which the proactive/soft auto-compaction triggers.
+# Unset: fire at the historical default of 0.80 * token_budget (160000 on the
+# 200000 default window). Set to push auto-compaction later (or earlier) than
+# the 80% derivation; clamped strictly below the critical 0.95 * budget ceiling.
+# auto_compact_threshold_tokens = 200000
 ```
 
 Env overrides (always win; empty `JCODE_PRE_COMPACT_ACTION` disables a config
-action):
-`JCODE_PRE_COMPACT_ACTION`, `JCODE_BLOCKING_COMPACT`.
+action; empty `JCODE_AUTO_COMPACT_THRESHOLD_TOKENS` restores the 0.80 * budget
+default):
+`JCODE_PRE_COMPACT_ACTION`, `JCODE_BLOCKING_COMPACT`,
+`JCODE_AUTO_COMPACT_THRESHOLD_TOKENS`.
 
 ## Pre-compact action
 
