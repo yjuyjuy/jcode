@@ -111,7 +111,20 @@ in `crates/jcode-base/src/compaction.rs`. The emergency hard-compact path
 (critical threshold, context-limit recovery) deliberately ignores both knobs.
 Forms and behavior are documented in `docs/COMPACTION.md` and the config
 template in `crates/jcode-base/src/config/default_file.rs`.
+## Provider-unavailability mark store scoping
 
+Transient provider-unavailability marks live in `ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS`
+(`crates/jcode-base/src/provider/models.rs`), keyed `{provider}::{account_label}`
+(for Claude/OpenAI) or `{provider}::global`. Readers resolve the key against the
+CURRENT active account, so marks are per-account by construction. Invariant: the
+reactive 429 switch (`reactive_switch_on_rate_limit` in `provider/account_failover.rs`)
+must record its mark for the exhausted account label via
+`record_provider_unavailable_for_account_label`, never the implicit current-scope
+variant - the record predates the override swap, so a reordering would poison the
+healthy sibling and force a cross-provider prompt. The failover pass
+(`complete_with_failover`, `provider/mod.rs`) tries sibling accounts before any
+cross-provider proposal; regression tests live in
+`provider/tests/reactive_switch_stays_on_claude.rs`.
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
