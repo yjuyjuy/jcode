@@ -121,7 +121,10 @@ fn pure_digit_seconds(word: &str) -> Option<u64> {
     if core.is_empty() || !core.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    core.parse::<u64>().ok()
+    match core.parse::<u64>() {
+        Ok(secs) => Some(secs),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]

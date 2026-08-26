@@ -59,15 +59,16 @@ pub(crate) async fn emit_terminal_error(
     tx: &mpsc::Sender<Result<StreamEvent>>,
     error: anyhow::Error,
 ) {
-    if let Some(retry_after_secs) = rate_limit_retry_after_secs(&error) {
-        let _ = tx
-            .send(Ok(StreamEvent::Error {
-                message: format!("{error:#}"),
-                retry_after_secs: Some(retry_after_secs),
-            }))
-            .await;
+    let event = if let Some(retry_after_secs) = rate_limit_retry_after_secs(&error) {
+        Ok(StreamEvent::Error {
+            message: format!("{error:#}"),
+            retry_after_secs: Some(retry_after_secs),
+        })
     } else {
-        let _ = tx.send(Err(error)).await;
+        Err(error)
+    };
+    if tx.send(event).await.is_err() {
+        // Receiver dropped: the consumer is gone, so there is nothing to notify.
     }
 }
 
@@ -83,15 +84,15 @@ pub(crate) async fn emit_exhausted_error(
 ) {
     let retry_after_secs = rate_limit_retry_after_secs(&error);
     let message = format!("Failed after {} retries: {:#}", max_retries, error);
-    if let Some(retry_after_secs) = retry_after_secs {
-        let _ = tx
-            .send(Ok(StreamEvent::Error {
-                message,
-                retry_after_secs: Some(retry_after_secs),
-            }))
-            .await;
-    } else {
-        let _ = tx.send(Err(anyhow::Error::msg(message))).await;
+    let event = match retry_after_secs {
+        Some(retry_after_secs) => Ok(StreamEvent::Error {
+            message,
+            retry_after_secs: Some(retry_after_secs),
+        }),
+        None => Err(anyhow::Error::msg(message)),
+    };
+    if tx.send(event).await.is_err() {
+        // Receiver dropped: the consumer is gone, so there is nothing to notify.
     }
 }
 
