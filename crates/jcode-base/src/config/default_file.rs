@@ -804,8 +804,11 @@ mod tests {
             template.contains("blocking_compact"),
             "the template should document blocking_compact"
         );
-        assert!(
-            template.contains("auto_compact_threshold_tokens = 200000"),
+        let parsed: Config =
+            toml::from_str(&template).expect("the shipped config template must parse");
+        assert_eq!(
+            parsed.compaction.auto_compact_threshold_tokens,
+            Some(200000),
             "the template should ship an active auto_compact_threshold_tokens = 200000 default"
         );
     }
