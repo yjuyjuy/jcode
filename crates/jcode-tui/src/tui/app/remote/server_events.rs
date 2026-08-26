@@ -1244,12 +1244,28 @@ pub(in crate::tui::app) fn handle_server_event(
             let reset_duration =
                 super::rate_limit_hold::rate_limit_hold_duration(&message, retry_after_secs);
             if let Some(reset_duration) = reset_duration {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                // Bound the rate-limit resend loop. Each armed resend counts
+                // against a budget so a persistently overloaded/429 server can
+                // no longer drive an unbounded resend storm (one resend per
+                // retry-after window forever, stoppable only by /cancel). When
+                // the budget is exhausted, drop the pending message and fall
+                // through to the terminal error path (which surfaces the error
+                // and arms the fallback offer) instead of re-arming.
+                let budget_ok = app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .map(|pending| pending.retry_attempts < App::RATE_LIMIT_MAX_ATTEMPTS)
+                    .unwrap_or(true);
                 if let Some(is_system) = app
                     .rate_limit_pending_message
                     .as_ref()
+                    .filter(|_| budget_ok)
                     .map(|pending| pending.is_system)
                 {
+                    if let Some(pending) = app.rate_limit_pending_message.as_mut() {
+                        pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+                    }
+                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
                     let rate_limit_line =
                         app.rate_limit_notice_with_nudge(reset_duration.as_secs());
                     app.push_display_message(DisplayMessage::system(rate_limit_line));
@@ -1267,6 +1283,17 @@ pub(in crate::tui::app) fn handle_server_event(
                     remote.clear_pending();
                     remote.reset_call_output_tokens_seen();
                     return false;
+                }
+                if !budget_ok {
+                    // Exhausted the rate-limit resend budget. Stop re-arming and
+                    // let the terminal error path below take over (it clears the
+                    // pending message, restores the prompt, and offers a
+                    // one-keypress switch to a working route).
+                    app.rate_limit_reset = None;
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "🛑 Stopped auto-retrying after {} rate-limit attempts. Use `/poke` to retry manually, or switch route.",
+                        App::RATE_LIMIT_MAX_ATTEMPTS
+                    )));
                 }
             }
             let is_failover_prompt =

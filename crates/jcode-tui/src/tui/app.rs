@@ -1717,6 +1717,16 @@ impl Provider for InertRuntimeProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
+    /// Cap on automatic rate-limit / server-busy (429/overloaded) resends of the
+    /// in-flight pending message. The reset-driven resend path
+    /// (`rate_limit_reset` armed on a `retry_after`-bearing error, consumed in
+    /// the tick loop) previously kept the pending message forever and never
+    /// incremented `retry_attempts`, so a persistently overloaded server drove
+    /// an unbounded resend storm (one resend per retry-after window) that only
+    /// `/cancel` could stop. Bounding it keeps legitimate short-window retries
+    /// working while guaranteeing termination. A little more patient than the
+    /// disconnect budget because a genuine rate limit is expected to clear.
+    const RATE_LIMIT_MAX_ATTEMPTS: u8 = 5;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one

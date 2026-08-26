@@ -2448,3 +2448,93 @@ fn test_credential_failure_breaker_resets_on_turn_success() {
         "a successful turn must reset the credential-failure streak"
     );
 }
+
+#[test]
+fn test_remote_rate_limit_resend_is_bounded_and_stops() {
+    // Regression: a persistently overloaded/429 ("server busy") server used to
+    // drive an unbounded resend storm. The reset-driven resend path armed
+    // `rate_limit_reset` and kept the pending message forever without ever
+    // incrementing `retry_attempts`, so it re-sent once per retry-after window
+    // until the user hit interrupt. It must now increment the attempt counter
+    // on each armed resend and terminate at `RATE_LIMIT_MAX_ATTEMPTS`.
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "do the thing".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        submission_nonce: Some("nonce-busy".to_string()),
+    });
+
+    // Each iteration mimics one turn that starts, then fails with a server-busy
+    // rate limit. The client would resend on the next tick; here we just verify
+    // that the armed-resend budget is enforced.
+    let mut armed_cycles = 0u8;
+    for iteration in 0..(App::RATE_LIMIT_MAX_ATTEMPTS as u32 + 3) {
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(100 + iteration as u64);
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 100 + iteration as u64,
+                message: "429 too many requests: overloaded_error, service temporarily busy"
+                    .to_string(),
+                retry_after_secs: Some(1),
+            },
+            &mut remote,
+        );
+
+        match app.rate_limit_pending_message.as_ref() {
+            Some(pending) => {
+                // Still retrying: the attempt counter must have advanced so the
+                // loop cannot run forever.
+                armed_cycles += 1;
+                assert_eq!(
+                    pending.retry_attempts, armed_cycles,
+                    "each armed rate-limit resend must increment retry_attempts"
+                );
+                assert!(
+                    pending.retry_attempts <= App::RATE_LIMIT_MAX_ATTEMPTS,
+                    "retry_attempts must never exceed the cap"
+                );
+                assert!(
+                    app.rate_limit_reset.is_some(),
+                    "a still-retrying rate limit must arm a reset timer"
+                );
+            }
+            None => {
+                // Budget exhausted: the loop terminated instead of re-arming.
+                assert!(
+                    app.rate_limit_reset.is_none(),
+                    "an exhausted rate-limit budget must not leave a reset armed"
+                );
+                break;
+            }
+        }
+    }
+
+    assert_eq!(
+        armed_cycles,
+        App::RATE_LIMIT_MAX_ATTEMPTS,
+        "rate-limit resends must be bounded to RATE_LIMIT_MAX_ATTEMPTS"
+    );
+    assert!(
+        app.rate_limit_pending_message.is_none(),
+        "after the budget is exhausted the pending message must be dropped, not resent forever"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Stopped auto-retrying")),
+        "the user must be told the auto-retry loop stopped"
+    );
+}
