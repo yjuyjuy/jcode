@@ -2028,20 +2028,11 @@ async fn run_stream_with_retries(
                             e
                         )))
                         .await;
-                } else if let Some(retry_after_secs) = rate_limit_retry_after_secs(&e) {
-                    // Terminal rate limit: carry the retry-after so the client
-                    // holds the turn and reschedules it instead of dropping it.
-                    // A bare anyhow error loses this metadata (retry_after_secs
-                    // would arrive as None and the TUI would drop the pending
-                    // message), so emit it as a structured Error event.
-                    let _ = tx
-                        .send(Ok(StreamEvent::Error {
-                            message: format!("{e:#}"),
-                            retry_after_secs: Some(retry_after_secs),
-                        }))
-                        .await;
                 } else {
-                    let _ = tx.send(Err(e)).await;
+                    // A terminal rate limit is emitted as a structured error
+                    // carrying the retry-after so the client holds and
+                    // reschedules the turn instead of dropping it.
+                    rate_limit_hold::emit_terminal_error(&tx, e).await;
                 }
                 return;
             }
@@ -2050,24 +2041,10 @@ async fn run_stream_with_retries(
 
     // All retries exhausted
     if let Some(e) = last_error {
-        // Compute the retry-after hint from the ORIGINAL error while its source
-        // chain (a possible `Retry-After` header) is still intact: wrapping it
-        // into the "Failed after N retries" message below flattens the chain.
-        let retry_after_secs = rate_limit_retry_after_secs(&e);
-        let message = format!("Failed after {} retries: {:#}", MAX_RETRIES, e);
-        if let Some(retry_after_secs) = retry_after_secs {
-            // The retry budget ran out on a rate limit. Preserve the retry-after
-            // so the client holds the turn and reschedules it rather than
-            // dropping it (a plain Err would arrive with retry_after_secs=None).
-            let _ = tx
-                .send(Ok(StreamEvent::Error {
-                    message,
-                    retry_after_secs: Some(retry_after_secs),
-                }))
-                .await;
-        } else {
-            let _ = tx.send(Err(anyhow::Error::msg(message))).await;
-        }
+        // Preserve a rate-limit retry-after hint (read from the original error
+        // before the "Failed after N retries" wrapper flattens its chain) so the
+        // client holds and reschedules the turn instead of dropping it.
+        rate_limit_hold::emit_exhausted_error(&tx, MAX_RETRIES, e).await;
     }
 }
 
@@ -2384,44 +2361,6 @@ fn is_retryable_error(error_str: &str) -> bool {
         // API-level server errors (SSE error events)
         || error_str.contains("api_error")
         || error_str.contains("internal server error")
-}
-
-/// Whether an error string is specifically an Anthropic rate limit (HTTP 429),
-/// as opposed to a generic transient/server error. Used to trigger a reactive
-/// account switch: only a rate limit means "this account is capped, try
-/// another", where a 5xx or transport blip is not account-specific.
-fn is_rate_limit_error(error_str: &str) -> bool {
-    let lower = error_str.to_ascii_lowercase();
-    lower.contains("429 too many requests")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-}
-
-/// Floor hold for a burst rate limit that arrives without a `Retry-After`
-/// header (Anthropic's bare `{"type":"rate_limit_error","message":"Rate
-/// limited"}`). Anthropic 429s are frequently burst/concurrency throttling
-/// rather than window exhaustion, so a short bounded wait lets the throttle
-/// clear instead of thrashing. Bounded by the same 60s cap the retry-after
-/// core enforces.
-const RATE_LIMIT_BURST_FLOOR_SECS: u64 = 60;
-
-/// Retry-after hint (in whole seconds) to attach to a *terminal* rate-limit
-/// error so the client can hold the turn and reschedule it instead of dropping
-/// it. Prefers the last-seen `Retry-After` header carried through the error
-/// chain; falls back to a bounded burst floor for a bare "Rate limited" 429
-/// with no header. Returns `None` for any non-rate-limit error so ordinary
-/// failures keep their existing (no-retry) semantics.
-fn rate_limit_retry_after_secs(error: &anyhow::Error) -> Option<u64> {
-    let error_str = format!("{error:#}").to_lowercase();
-    if !is_rate_limit_error(&error_str) {
-        return None;
-    }
-    let header_secs = jcode_provider_core::retry_after::retry_after_from_error(error)
-        .map(|delay| delay.as_secs())
-        // A header that resolved to 0 remaining (already elapsed) is not a
-        // useful hold: fall back to the burst floor so the client still waits.
-        .filter(|secs| *secs > 0);
-    Some(header_secs.unwrap_or(RATE_LIMIT_BURST_FLOOR_SECS))
 }
 
 fn is_fable_scoped_limit_error(model: &str, error: &str) -> bool {
@@ -2894,6 +2833,11 @@ use sse_types::{
 };
 
 mod context_window;
+
+mod rate_limit_hold;
+use rate_limit_hold::is_rate_limit_error;
+#[cfg(test)]
+use rate_limit_hold::{RATE_LIMIT_BURST_FLOOR_SECS, rate_limit_retry_after_secs};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

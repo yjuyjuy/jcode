@@ -9,13 +9,6 @@ fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
 
-/// Bounded default hold applied to a rate-limit error that carries no usable
-/// reset time (no `retry_after_secs`, no parseable reset in the message text).
-/// Short enough that a transient burst throttle clears promptly, long enough to
-/// avoid immediately re-hammering the limiter. This mirrors the provider-side
-/// burst floor and keeps the turn alive instead of dropping it.
-const RATE_LIMIT_DEFAULT_HOLD_SECS: u64 = 60;
-
 /// Parse a jcode version string into an orderable `(major, minor, patch)`, but
 /// only for *clean release* builds.
 ///
@@ -1247,22 +1240,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return true;
             }
-            // Classify a rate limit FIRST, before any duration parsing. A
-            // rate-limit failure must ALWAYS hold the pending turn and schedule
-            // a resend, never drop it - even when no reset time can be recovered
-            // (a bare Anthropic "Rate limited" 429 with no Retry-After header
-            // and only a request_id). Prefer the provider's retry_after_secs,
-            // then any reset time parsed from the message text, and finally a
-            // bounded default floor so the hold always fires. The request_id can
-            // never drive this timer (see parse_rate_limit_error).
-            let looks_like_rate_limit =
-                crate::tui::app::helpers::error_looks_like_rate_limit(&message);
-            let reset_duration = retry_after_secs
-                .map(Duration::from_secs)
-                .or_else(|| parse_rate_limit_error(&message))
-                .or_else(|| {
-                    looks_like_rate_limit.then(|| Duration::from_secs(RATE_LIMIT_DEFAULT_HOLD_SECS))
-                });
+            // A rate limit must ALWAYS hold the pending turn, never drop it.
+            let reset_duration =
+                super::rate_limit_hold::rate_limit_hold_duration(&message, retry_after_secs);
             if let Some(reset_duration) = reset_duration {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
                 if let Some(is_system) = app
