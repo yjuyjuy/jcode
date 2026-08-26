@@ -478,6 +478,7 @@ impl MultiProvider {
                 ModelRouteApiMethod::OpenAiCompatible { profile_id: None }
                 | ModelRouteApiMethod::CodeAssistOAuth
                 | ModelRouteApiMethod::RemoteCatalog
+                | ModelRouteApiMethod::ChatgptWeb
                 | ModelRouteApiMethod::Current
                 | ModelRouteApiMethod::Other(_) => {}
             }

@@ -710,8 +710,15 @@ pub enum RuntimeKey {
     Antigravity,
     CodeAssistOAuth,
     RemoteCatalog,
+    ChatgptWeb,
     Current,
-    Other(String),
+    // Struct (not newtype) variant: serde's internally-tagged form can encode a
+    // struct variant but NOT a newtype variant holding a bare String, so this is
+    // the only shape that survives `serde_json::to_*` for the catch-all. See the
+    // serialize round-trip test.
+    Other {
+        method: String,
+    },
 }
 
 impl RuntimeKey {
@@ -732,8 +739,11 @@ impl RuntimeKey {
             ModelRouteApiMethod::CodeAssistOAuth => Self::CodeAssistOAuth,
             ModelRouteApiMethod::AntigravityHttps => Self::Antigravity,
             ModelRouteApiMethod::RemoteCatalog => Self::RemoteCatalog,
+            ModelRouteApiMethod::ChatgptWeb => Self::ChatgptWeb,
             ModelRouteApiMethod::Current => Self::Current,
-            ModelRouteApiMethod::Other(method) => Self::Other(method.clone()),
+            ModelRouteApiMethod::Other(method) => Self::Other {
+                method: method.clone(),
+            },
         }
     }
 
@@ -756,8 +766,9 @@ impl RuntimeKey {
             Self::Antigravity => "antigravity".to_string(),
             Self::CodeAssistOAuth => "code-assist-oauth".to_string(),
             Self::RemoteCatalog => "remote-catalog".to_string(),
+            Self::ChatgptWeb => "chatgpt-web".to_string(),
             Self::Current => "current".to_string(),
-            Self::Other(value) => value.clone(),
+            Self::Other { method } => method.clone(),
         }
     }
 }
@@ -829,8 +840,9 @@ impl RouteSelection {
             RuntimeKey::Gemini
             | RuntimeKey::CodeAssistOAuth
             | RuntimeKey::RemoteCatalog
+            | RuntimeKey::ChatgptWeb
             | RuntimeKey::Current
-            | RuntimeKey::Other(_) => model.to_string(),
+            | RuntimeKey::Other { .. } => model.to_string(),
         }
     }
 }
@@ -868,6 +880,7 @@ pub enum ModelRouteApiMethod {
     CodeAssistOAuth,
     AntigravityHttps,
     RemoteCatalog,
+    ChatgptWeb,
     Current,
     Other(String),
 }
@@ -903,6 +916,7 @@ impl ModelRouteApiMethod {
             "code-assist-oauth" => Self::CodeAssistOAuth,
             "https" => Self::AntigravityHttps,
             "remote-catalog" => Self::RemoteCatalog,
+            "chatgpt-web" => Self::ChatgptWeb,
             "current" => Self::Current,
             _ => {
                 if let Some(("openai-compatible", profile_id)) = lower.split_once(':') {
@@ -972,6 +986,7 @@ impl ModelRouteApiMethod {
             Self::Bedrock => "bedrock".to_string(),
             Self::AntigravityHttps => "https".to_string(),
             Self::RemoteCatalog => "remote-catalog".to_string(),
+            Self::ChatgptWeb => "chatgpt-web".to_string(),
             Self::Current => "current".to_string(),
             Self::Other(method) => method
                 .split_once(':')
@@ -1335,6 +1350,103 @@ fn reference_request_cost_micros(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `RuntimeKey` variant must survive a serde round-trip. The catch-all
+    /// used to be a newtype `Other(String)`, which serde's internally-tagged
+    /// (`#[serde(tag = "kind")]`) form CANNOT serialize: it produced
+    /// `cannot serialize tagged newtype variant RuntimeKey::Other containing a
+    /// string` and wedged every cross-provider failover whose target resolved to
+    /// an unrecognized api_method (chatgpt-web on a box with a Firefox session).
+    /// Reverting `Other` to the newtype shape turns this test red with that exact
+    /// message; the struct-variant shape keeps it green.
+    #[test]
+    fn runtime_key_every_variant_serialize_round_trips() {
+        let variants = [
+            RuntimeKey::JcodeSubscription,
+            RuntimeKey::ClaudeOAuth,
+            RuntimeKey::AnthropicApiKey,
+            RuntimeKey::OpenAIOAuth,
+            RuntimeKey::OpenAIApiKey,
+            RuntimeKey::OpenRouter,
+            RuntimeKey::OpenAiCompatible { profile_id: None },
+            RuntimeKey::OpenAiCompatible {
+                profile_id: Some("acme".to_string()),
+            },
+            RuntimeKey::Copilot,
+            RuntimeKey::Gemini,
+            RuntimeKey::Cursor,
+            RuntimeKey::Bedrock,
+            RuntimeKey::Antigravity,
+            RuntimeKey::CodeAssistOAuth,
+            RuntimeKey::RemoteCatalog,
+            RuntimeKey::ChatgptWeb,
+            RuntimeKey::Current,
+            RuntimeKey::Other {
+                method: "some-future-method".to_string(),
+            },
+        ];
+        for key in variants {
+            let json = serde_json::to_string(&key)
+                .unwrap_or_else(|err| panic!("serialize {key:?} must not fail: {err}"));
+            let back: RuntimeKey = serde_json::from_str(&json)
+                .unwrap_or_else(|err| panic!("deserialize {json} must not fail: {err}"));
+            assert_eq!(key, back, "round-trip mismatch for {json}");
+        }
+    }
+
+    /// The exact serialize failure from the field report, pinned so the catch-all
+    /// can never silently regress to an unserializable shape. This is the
+    /// reachable-by-default case: an Anthropic 429 selecting the ChatGPT web
+    /// route as the failover target.
+    #[test]
+    fn runtime_key_catch_all_serializes_as_struct_variant() {
+        let key = RuntimeKey::Other {
+            method: "chatgpt-web".to_string(),
+        };
+        let json = serde_json::to_value(&key).expect("catch-all must serialize");
+        assert_eq!(json["kind"], "other");
+        assert_eq!(json["method"], "chatgpt-web");
+    }
+
+    /// The web route now has a real identity instead of the anonymous catch-all,
+    /// so the whole failover path stops depending on the fragile `Other` shape.
+    #[test]
+    fn chatgpt_web_parses_to_real_variant_not_catch_all() {
+        let method = ModelRouteApiMethod::parse("chatgpt-web");
+        assert_eq!(method, ModelRouteApiMethod::ChatgptWeb);
+        assert!(
+            !matches!(method, ModelRouteApiMethod::Other(_)),
+            "chatgpt-web must not fall through to the catch-all"
+        );
+
+        let key = RuntimeKey::from_api_method(&method, "OpenAI");
+        assert_eq!(key, RuntimeKey::ChatgptWeb);
+        // And its runtime identity serializes cleanly, unit-tagged.
+        let json = serde_json::to_value(&key).expect("chatgpt-web key must serialize");
+        assert_eq!(json["kind"], "chatgpt-web");
+        assert_eq!(key.stable_id(), "chatgpt-web");
+    }
+
+    /// The whole reported failure chain, end to end at this seam: a ChatGPT web
+    /// `ModelRoute` -> `RouteSelection` (as the failover countdown builds it) ->
+    /// serialize (as `set_route_selection` does over the IPC wire) -> deserialize.
+    /// Before the fix this serialize step is exactly where the switch died.
+    #[test]
+    fn chatgpt_web_route_selection_serializes_for_switch() {
+        let route = ModelRoute {
+            model: crate::CHATGPT_WEB_MODEL.to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "chatgpt-web".to_string(),
+            available: true,
+            detail: "logged-in Firefox ChatGPT session".to_string(),
+            cheapness: None,
+        };
+        let selection = RouteSelection::from_model_route(&route);
+        assert_eq!(selection.runtime_key, RuntimeKey::ChatgptWeb);
+        let json = serde_json::to_string(&selection).expect("selection must serialize");
+        let back: RouteSelection = serde_json::from_str(&json).expect("selection round-trips");
+        assert_eq!(selection, back);
+    }
 
     #[test]
     fn metered_estimate_computes_reference_cost() {

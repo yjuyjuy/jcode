@@ -50,6 +50,7 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::CodeAssistOAuth
         | Method::AntigravityHttps
         | Method::RemoteCatalog
+        | Method::ChatgptWeb
         | Method::Current
         | Method::Other(_) => false,
     }

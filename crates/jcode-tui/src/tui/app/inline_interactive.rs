@@ -335,7 +335,10 @@ fn remote_catalog_text_is_safe(value: &str, max_bytes: usize, allow_empty: bool)
 fn remote_catalog_api_method_is_safe(api_method: &str) -> bool {
     use crate::provider::ModelRouteApiMethod as Method;
     match Method::parse(api_method) {
-        Method::Other(_) | Method::Current => false,
+        // chatgpt-web is a locally-built browser route, never a legitimate
+        // remote-catalog api_method; keep it rejected as before it had an
+        // identity (it used to fall into Other -> false).
+        Method::Other(_) | Method::Current | Method::ChatgptWeb => false,
         Method::OpenAiCompatible {
             profile_id: Some(profile_id),
         } => {
