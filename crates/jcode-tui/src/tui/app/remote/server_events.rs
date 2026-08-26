@@ -1240,9 +1240,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return true;
             }
-            let reset_duration = retry_after_secs
-                .map(Duration::from_secs)
-                .or_else(|| parse_rate_limit_error(&message));
+            // A rate limit must ALWAYS hold the pending turn, never drop it.
+            let reset_duration =
+                super::rate_limit_hold::rate_limit_hold_duration(&message, retry_after_secs);
             if let Some(reset_duration) = reset_duration {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
                 if let Some(is_system) = app

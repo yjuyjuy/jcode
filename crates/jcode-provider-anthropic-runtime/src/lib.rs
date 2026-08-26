@@ -2029,7 +2029,10 @@ async fn run_stream_with_retries(
                         )))
                         .await;
                 } else {
-                    let _ = tx.send(Err(e)).await;
+                    // A terminal rate limit is emitted as a structured error
+                    // carrying the retry-after so the client holds and
+                    // reschedules the turn instead of dropping it.
+                    rate_limit_hold::emit_terminal_error(&tx, e).await;
                 }
                 return;
             }
@@ -2038,13 +2041,10 @@ async fn run_stream_with_retries(
 
     // All retries exhausted
     if let Some(e) = last_error {
-        let _ = tx
-            .send(Err(anyhow::anyhow!(
-                "Failed after {} retries: {}",
-                MAX_RETRIES,
-                e
-            )))
-            .await;
+        // Preserve a rate-limit retry-after hint (read from the original error
+        // before the "Failed after N retries" wrapper flattens its chain) so the
+        // client holds and reschedules the turn instead of dropping it.
+        rate_limit_hold::emit_exhausted_error(&tx, MAX_RETRIES, e).await;
     }
 }
 
@@ -2361,17 +2361,6 @@ fn is_retryable_error(error_str: &str) -> bool {
         // API-level server errors (SSE error events)
         || error_str.contains("api_error")
         || error_str.contains("internal server error")
-}
-
-/// Whether an error string is specifically an Anthropic rate limit (HTTP 429),
-/// as opposed to a generic transient/server error. Used to trigger a reactive
-/// account switch: only a rate limit means "this account is capped, try
-/// another", where a 5xx or transport blip is not account-specific.
-fn is_rate_limit_error(error_str: &str) -> bool {
-    let lower = error_str.to_ascii_lowercase();
-    lower.contains("429 too many requests")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
 }
 
 fn is_fable_scoped_limit_error(model: &str, error: &str) -> bool {
@@ -2844,6 +2833,9 @@ use sse_types::{
 };
 
 mod context_window;
+
+mod rate_limit_hold;
+use rate_limit_hold::is_rate_limit_error;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
