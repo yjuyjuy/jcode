@@ -208,6 +208,11 @@ pub struct CompactionManager {
 
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
+
+    /// One-shot guard so the "configured threshold exceeds critical ceiling"
+    /// clamp is logged at most once per budget rather than on every per-turn
+    /// `soft_threshold_tokens()` read.
+    clamp_log_emitted: std::sync::atomic::AtomicBool,
 }
 
 impl CompactionManager {
@@ -234,6 +239,7 @@ impl CompactionManager {
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
             semantic_embed_cache: HashMap::with_capacity(SEMANTIC_EMBED_CACHE_CAPACITY),
             semantic_embed_cache_counter: 0,
+            clamp_log_emitted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -311,6 +317,10 @@ impl CompactionManager {
 
     /// Update the token budget (e.g., when model changes)
     pub fn set_budget(&mut self, budget: usize) {
+        if budget != self.token_budget {
+            self.clamp_log_emitted
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         self.token_budget = budget;
     }
 
@@ -341,10 +351,15 @@ impl CompactionManager {
         // one-token margin so an equal value still fires softly first.
         let ceiling = (CRITICAL_THRESHOLD as f64 * budget - 1.0).max(0.0);
         if configured > ceiling {
-            crate::logging::info(&format!(
-                "[compaction] auto_compact_threshold_tokens={:.0} exceeds critical ceiling {:.0} (budget={:.0}); clamping to ceiling",
-                configured, ceiling, budget
-            ));
+            if !self
+                .clamp_log_emitted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                crate::logging::info(&format!(
+                    "[compaction] auto_compact_threshold_tokens={:.0} exceeds critical ceiling {:.0} (budget={:.0}); clamping to ceiling",
+                    configured, ceiling, budget
+                ));
+            }
             return ceiling;
         }
         configured
