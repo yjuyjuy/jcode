@@ -29,6 +29,10 @@ impl App {
             provider_count: providers.len(),
             default_provider: cfg.provider.default_provider.clone(),
             default_model: cfg.provider.default_model.clone(),
+            // Name THIS session's account in the floating box, with an explicit
+            // fallback to the resolved global account when the session follows it.
+            session_account: self.session_account_label(),
+            session_account_pinned: self.session_account_is_pinned(),
             ..Default::default()
         };
 
@@ -1203,34 +1207,6 @@ impl App {
                 self.input = format!("{} {}", command_prefix, value);
                 self.cursor_pos = self.input.len();
                 self.submit_input();
-            }
-        }
-    }
-
-    pub(crate) fn next_account_picker_action(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> anyhow::Result<Option<crate::tui::account_picker::AccountPickerCommand>> {
-        use crate::tui::account_picker::OverlayAction;
-
-        let action = {
-            let Some(picker_cell) = self.account_picker_overlay.as_ref() else {
-                return Ok(None);
-            };
-            let mut picker = picker_cell.borrow_mut();
-            picker.handle_overlay_key(code, modifiers)?
-        };
-
-        match action {
-            OverlayAction::Continue => Ok(None),
-            OverlayAction::Close => {
-                self.account_picker_overlay = None;
-                Ok(None)
-            }
-            OverlayAction::Execute(command) => {
-                self.account_picker_overlay = None;
-                Ok(Some(command))
             }
         }
     }

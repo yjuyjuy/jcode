@@ -91,6 +91,8 @@ fn test_session_list_event_roundtrip() -> Result<()> {
             provider: Some("Claude".to_string()),
             account: Some("claude-2".to_string()),
             model: Some("claude-opus-5".to_string()),
+            effort: Some("high".to_string()),
+            transcript_bytes: Some(4096),
             is_processing: true,
         }],
     };
@@ -104,7 +106,42 @@ fn test_session_list_event_roundtrip() -> Result<()> {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, "sess_1");
     assert_eq!(sessions[0].account.as_deref(), Some("claude-2"));
+    assert_eq!(sessions[0].effort.as_deref(), Some("high"));
+    assert_eq!(sessions[0].transcript_bytes, Some(4096));
     assert!(sessions[0].is_processing);
+    Ok(())
+}
+
+#[test]
+fn test_session_list_event_omits_absent_effort_and_context() -> Result<()> {
+    // The new health fields are additive: when a session has no effort and the
+    // daemon could not stat its record, both are omitted from the wire so an
+    // older client that predates them still deserializes the event.
+    let event = ServerEvent::SessionList {
+        id: 7,
+        sessions: vec![SessionControlInfo {
+            session_id: "sess_2".to_string(),
+            friendly_name: None,
+            provider: Some("OpenAI".to_string()),
+            account: None,
+            model: Some("gpt-5".to_string()),
+            effort: None,
+            transcript_bytes: None,
+            is_processing: false,
+        }],
+    };
+    let json = encode_event(&event);
+    assert!(!json.contains("effort"), "unexpected effort in {json}");
+    assert!(
+        !json.contains("transcript_bytes"),
+        "unexpected transcript_bytes in {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::SessionList { sessions, .. } = decoded else {
+        return Err(anyhow!("expected SessionList event"));
+    };
+    assert_eq!(sessions[0].effort, None);
+    assert_eq!(sessions[0].transcript_bytes, None);
     Ok(())
 }
 

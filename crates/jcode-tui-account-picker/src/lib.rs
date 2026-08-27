@@ -76,6 +76,15 @@ pub struct AccountPickerSummary {
     pub named_account_count: usize,
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
+    /// Account label THIS session's active provider is using, shown so the
+    /// floating account box names the running session's account rather than only
+    /// the global default. `None` when the active provider has no named account
+    /// (or the session is remote). Rendered with [`Self::session_account_pinned`]
+    /// to mark whether it is a per-session pin or the followed global account.
+    pub session_account: Option<String>,
+    /// True when [`Self::session_account`] is a per-session pin; false when it is
+    /// the process-global active account the session follows.
+    pub session_account_pinned: bool,
 }
 
 pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {

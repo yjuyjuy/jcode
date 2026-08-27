@@ -19,6 +19,7 @@ use tokio::time::{Duration, timeout};
 struct AccountAwareProvider {
     model: StdMutex<String>,
     account: StdMutex<Option<String>>,
+    effort: StdMutex<Option<String>>,
     set_model_calls: AtomicUsize,
 }
 
@@ -27,6 +28,7 @@ impl AccountAwareProvider {
         Self {
             model: StdMutex::new(model.to_string()),
             account: StdMutex::new(None),
+            effort: StdMutex::new(None),
             set_model_calls: AtomicUsize::new(0),
         }
     }
@@ -79,10 +81,20 @@ impl Provider for AccountAwareProvider {
         Ok(())
     }
 
+    fn reasoning_effort(&self) -> Option<String> {
+        self.effort.lock().expect("effort lock").clone()
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+        *self.effort.lock().expect("effort lock") = Some(effort.to_string());
+        Ok(())
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             model: StdMutex::new(self.model()),
             account: StdMutex::new(self.account_label()),
+            effort: StdMutex::new(self.reasoning_effort()),
             set_model_calls: AtomicUsize::new(0),
         })
     }
@@ -153,11 +165,27 @@ async fn fixture(
 #[tokio::test]
 async fn list_sessions_reports_provider_account_model() {
     let _guard = crate::storage::lock_test_env();
+    // A temp JCODE_HOME lets the health view's transcript-size proxy find a real
+    // session record to stat, without touching the developer's ~/.jcode.
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
     let (sessions, _connections, swarm_members, providers) =
         fixture(&[("session_list_a", "model-a")]).await;
     providers["session_list_a"]
         .set_account_label(Some("claude-2".to_string()))
         .unwrap();
+    providers["session_list_a"]
+        .set_reasoning_effort("high")
+        .unwrap();
+
+    // Write the record after building the fixture so its byte length is exactly
+    // what we assert, independent of any persistence during agent construction.
+    let sessions_dir = temp_home.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let record = sessions_dir.join("session_list_a.json");
+    let record_body = "{\"id\":\"session_list_a\"}";
+    std::fs::write(&record, record_body).expect("write session record");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     handle_list_sessions(1, &sessions, &swarm_members, &tx).await;
@@ -172,6 +200,10 @@ async fn list_sessions_reports_provider_account_model() {
     assert_eq!(info.session_id, "session_list_a");
     assert_eq!(info.provider.as_deref(), Some("account-aware"));
     assert_eq!(info.account.as_deref(), Some("claude-2"));
+    // Reasoning effort rides the same live-agent snapshot as account/model.
+    assert_eq!(info.effort.as_deref(), Some("high"));
+    // Context-size proxy: the exact byte length of the stored record.
+    assert_eq!(info.transcript_bytes, Some(record_body.len() as u64));
     // The agent may restore a provider-key-prefixed model spec on construction
     // (e.g. "claude:model-a"); the control surface reports whatever the provider
     // returns, so assert on the model suffix rather than the exact prefix.
@@ -181,6 +213,42 @@ async fn list_sessions_reports_provider_account_model() {
         info.model
     );
     assert!(!info.is_processing);
+
+    crate::env::remove_var("JCODE_HOME");
+}
+
+#[tokio::test]
+async fn list_sessions_reports_effort_none_when_unset_and_a_context_size() {
+    let _guard = crate::storage::lock_test_env();
+    // A live session persists its record on construction, so the health view's
+    // transcript-size proxy is present; a provider with no configured effort
+    // reports None (which the wire then omits, covered by the protocol test).
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let (sessions, _connections, swarm_members, _providers) =
+        fixture(&[("session_bare_a", "model-a")]).await;
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    handle_list_sessions(2, &sessions, &swarm_members, &tx).await;
+
+    let ServerEvent::SessionList { sessions: list, .. } =
+        rx.try_recv().expect("session list event")
+    else {
+        panic!("expected SessionList");
+    };
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].effort, None);
+    // A real live session has a persisted record, so the size proxy is present
+    // and positive. The None (omit-on-wire) branch is asserted in the protocol
+    // roundtrip test.
+    assert!(
+        list[0].transcript_bytes.map(|b| b > 0).unwrap_or(false),
+        "live session should report a positive context size, got {:?}",
+        list[0].transcript_bytes
+    );
+
+    crate::env::remove_var("JCODE_HOME");
 }
 
 #[tokio::test]

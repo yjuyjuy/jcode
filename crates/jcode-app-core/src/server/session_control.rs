@@ -74,6 +74,8 @@ pub(super) async fn handle_list_sessions(
                 provider: Some(agent.provider_name()),
                 account: agent.account_label(),
                 model: Some(agent.provider_model()),
+                effort: agent.reasoning_effort(),
+                transcript_bytes: session_transcript_bytes(session_id),
                 is_processing: member_running,
             },
             Err(_) => SessionControlInfo {
@@ -82,6 +84,8 @@ pub(super) async fn handle_list_sessions(
                 provider: None,
                 account: None,
                 model: None,
+                effort: None,
+                transcript_bytes: session_transcript_bytes(session_id),
                 is_processing: true,
             },
         };
@@ -268,6 +272,35 @@ fn apply_switch(
             deferred,
             error: Some(format!("{error:#}")),
         },
+    }
+}
+
+/// Size of a session's persisted record in bytes, a cheap monotonic proxy for
+/// "how much conversation is in here" that the `session list` health view
+/// surfaces. Statting the file avoids loading or locking the live agent, so a
+/// busy (mid-turn) session still reports a context size. Best-effort: an
+/// unreadable, missing, or non-id-shaped session simply reports `None` rather
+/// than failing the list. Mirrors the harness API's `transcript_bytes` (see
+/// `crates/jcode-harness-api-server/src/translate.rs`).
+fn session_transcript_bytes(session_id: &str) -> Option<u64> {
+    // Session ids are `session_<name>_<millis>_<hex>`; reject anything with a
+    // path separator or parent reference so this can never stat outside the
+    // sessions directory.
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return None;
+    }
+    let Ok(dir) = crate::storage::jcode_dir() else {
+        return None;
+    };
+    let path = dir.join("sessions").join(format!("{session_id}.json"));
+    match std::fs::metadata(path) {
+        Ok(meta) => Some(meta.len()),
+        Err(_) => None,
     }
 }
 

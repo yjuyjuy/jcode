@@ -2,6 +2,8 @@
 mod auth_account_commands;
 #[path = "auth_account_picker.rs"]
 mod auth_account_picker;
+#[path = "auth_account_picker_overlay.rs"]
+mod auth_account_picker_overlay;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
@@ -12,7 +14,6 @@ pub(crate) use self::auth_account_commands::{
 pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLogin};
 
 use super::*;
-use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
 impl App {

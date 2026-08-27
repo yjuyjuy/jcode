@@ -2,10 +2,10 @@ use super::{
     BackgroundInfo, CacheHitInfo, CacheMissAttribution, GraphEdge, GraphNode, InfoWidgetData,
     Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
-    calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
-    render_kv_cache_widget, render_memory_compact, render_memory_widget, render_model_widget,
-    render_todos_compact, render_todos_expanded, render_todos_widget, render_usage_compact,
-    render_usage_widget, swarm_plan_todos, truncate_smart,
+    calculate_widget_height, effective_prompt_tokens, occasional_status_tip, render_memory_compact,
+    render_memory_widget, render_model_widget, render_todos_compact, render_todos_expanded,
+    render_todos_widget, render_usage_compact, render_usage_widget, swarm_plan_todos,
+    truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -77,7 +77,7 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     };
 
     assert!(data.has_data_for(WidgetKind::KvCache));
-    let lines = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
+    let lines = super::kv_cache::render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
     let text = lines_text(&lines);
 
     assert_eq!(lines.len(), 4);

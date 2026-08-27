@@ -701,3 +701,65 @@ fn draw_notification_clips_overwide_notice_at_area_width() {
         "expected clipped notice text inside area, got: {inside:?}"
     );
 }
+
+#[test]
+fn overscroll_status_shows_session_account_name() {
+    // Part 2: the scroll-region status strip names THIS session's account
+    // (from InfoWidgetData.account_label) alongside the model/provider so the
+    // running session's account is visible there, consistent with the box.
+    let mut data = info_widget::InfoWidgetData {
+        model: Some("claude-opus-5".to_string()),
+        provider_name: Some("Claude".to_string()),
+        ..Default::default()
+    };
+    data.account_label = Some("claude-2".to_string());
+    let state = TestState {
+        info_widget_data: data,
+        chat_overscroll_active: true,
+        ..Default::default()
+    };
+
+    let backend = TestBackend::new(80, 1);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let area = Rect::new(0, 0, 80, 1);
+    terminal
+        .draw(|frame| input_ui::draw_overscroll_status(frame, &state, area))
+        .expect("overscroll status should render without panic");
+
+    let rows = buffer_rows(&terminal);
+    assert!(
+        rows[0].contains("@claude-2"),
+        "overscroll strip should show the session account; got: {:?}",
+        rows[0]
+    );
+}
+
+#[test]
+fn overscroll_status_omits_account_when_absent() {
+    // No named account (or remote session): the strip simply omits the account
+    // rather than showing an empty marker.
+    let state = TestState {
+        info_widget_data: info_widget::InfoWidgetData {
+            model: Some("gpt-5".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            account_label: None,
+            ..Default::default()
+        },
+        chat_overscroll_active: true,
+        ..Default::default()
+    };
+
+    let backend = TestBackend::new(80, 1);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let area = Rect::new(0, 0, 80, 1);
+    terminal
+        .draw(|frame| input_ui::draw_overscroll_status(frame, &state, area))
+        .expect("overscroll status should render without panic");
+
+    let rows = buffer_rows(&terminal);
+    assert!(
+        !rows[0].contains('@'),
+        "overscroll strip should omit the account marker when none; got: {:?}",
+        rows[0]
+    );
+}

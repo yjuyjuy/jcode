@@ -1528,43 +1528,7 @@ pub enum ServerEvent {
     },
 }
 
-/// One live session's control-surface identity: provider, account, and model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionControlInfo {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub friendly_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Account label the session's active provider is pinned to, or `None` when
-    /// it follows the process-global active account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// True when a turn is currently running for this session. A switch is still
-    /// accepted; it is adopted on the next turn (drain semantics).
-    #[serde(default)]
-    pub is_processing: bool,
-}
-
-/// Per-session outcome of an account (and optional model) switch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionSwitchOutcome {
-    pub session_id: String,
-    /// True when the switch was applied (or queued to apply on the next turn).
-    pub ok: bool,
-    /// The account label the session now targets, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account: Option<String>,
-    /// The model the session now targets, when a model switch was requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// True when the switch was accepted but deferred because a turn was in
-    /// flight; it applies on that session's next turn.
-    #[serde(default)]
-    pub deferred: bool,
-    /// Failure reason when `ok` is false.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+// `SessionControlInfo` and `SessionSwitchOutcome` live in the sibling
+// `wire_session_control` module (kept out of this file for the code-size
+// budget) and are re-exported from the crate root alongside the other wire
+// types.
