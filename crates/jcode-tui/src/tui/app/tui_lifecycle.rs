@@ -282,6 +282,7 @@ impl App {
     pub(super) fn clear_pending_remote_retry(&mut self) {
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
+        self.busy_recovery_attempts = None;
     }
 
     /// Track a failed turn for the credential-failure circuit breaker.
@@ -717,6 +718,7 @@ impl App {
             rate_limit_reset: None,
             rate_limit_pending_message: None,
             busy_recovered_submission: None,
+            busy_recovery_attempts: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
@@ -1162,6 +1164,7 @@ impl App {
             rate_limit_reset: None,
             rate_limit_pending_message: None,
             busy_recovered_submission: None,
+            busy_recovery_attempts: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,

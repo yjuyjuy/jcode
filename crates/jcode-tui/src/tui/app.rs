@@ -1574,6 +1574,14 @@ pub struct App {
     // the re-appended user turn instead of duplicating it. Cleared once reused or
     // on turn completion.
     busy_recovered_submission: Option<(String, String)>,
+    // Per-submission busy-rejection recovery counter. Keyed on the submission
+    // nonce of the message currently being recovered through the busy-rejection
+    // path ("Already processing a message"). Each recovery of the SAME nonce
+    // increments the count; when it reaches `BUSY_RECOVERY_MAX_ATTEMPTS` the
+    // recovery is refused so a reconnect/reload race can no longer drive an
+    // unbounded resend storm (one queued message sent 174 times). Reset on turn
+    // completion, on a genuinely new submission, or on session change.
+    busy_recovery_attempts: Option<(String, u8)>,
     // Consecutive turn errors that classify as credential/auth failures.
     // Reset on turn success or auth change; drives the credential-failure
     // circuit breaker that halts automatic resends (see
@@ -1727,6 +1735,18 @@ impl App {
     /// working while guaranteeing termination. A little more patient than the
     /// disconnect budget because a genuine rate limit is expected to clear.
     const RATE_LIMIT_MAX_ATTEMPTS: u8 = 5;
+    /// Cap on busy-rejection ("Already processing a message") recoveries of the
+    /// SAME queued submission. The busy-recovery path re-queues an in-flight
+    /// follow-up when the server rejects it because a prior turn is still
+    /// running (issue #391 recovery), then re-dispatches it once the turn looks
+    /// idle. A reconnect/reload race that leaves the server turn permanently
+    /// "running" from the client's view turned this into an unbounded resend
+    /// storm (observed live: one queued message re-sent 174 times, one send per
+    /// dispatch tick). Bounding the number of busy recoveries for a single
+    /// submission guarantees termination while still surviving the ordinary
+    /// one-or-two-cycle race. On exhaustion the message is restored to the input
+    /// box (never silently dropped, per issue #391) instead of re-queued.
+    const BUSY_RECOVERY_MAX_ATTEMPTS: u8 = 8;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
