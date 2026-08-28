@@ -1252,3 +1252,137 @@ fn combine_remote_drain_still_sends_the_whole_queue_at_once() {
         "combine mode must keep draining the whole queue at once"
     );
 }
+
+/// Regression for the "single queued message sent 174 times" storm
+/// (session_crab_1787339035764_29f00144e5a5d1d6).
+///
+/// A reconnect/reload race can leave a server turn "running" from the client's
+/// view while its history snapshot reads idle. The client dequeues its
+/// follow-up and sends it; the server rejects it with "Already processing a
+/// message"; the busy-recovery path re-queues it and re-adopts the running
+/// turn. When the same race clears the running-turn state on the next tick, the
+/// follow-up dispatches again, is rejected again, and re-queues again, with no
+/// backoff and no send-side de-dup: one queued message re-sent once per tick
+/// until the user hit Ctrl-C.
+///
+/// The fix bounds busy recoveries of the same submission at
+/// `App::BUSY_RECOVERY_MAX_ATTEMPTS`. This test drives the full
+/// dispatch -> busy-reject -> re-queue loop far past the cap and asserts the
+/// message is sent at most `BUSY_RECOVERY_MAX_ATTEMPTS + 1` times (the initial
+/// dispatch plus the capped recoveries), that the loop then terminates, and
+/// that the user's text is restored to the input box rather than dropped
+/// (issue #391).
+#[test]
+fn busy_rejection_reloop_resends_queued_message_is_bounded() {
+    use tokio::io::AsyncReadExt;
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("session_busy_storm".to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let mut peer = remote
+        .take_dummy_peer()
+        .expect("dummy remote should retain peer stream");
+
+    let storm_message = "stop at the next stopping point".to_string();
+    app.queued_messages.push(storm_message.clone());
+
+    // Drive the loop generously past the cap. Each iteration simulates the race
+    // that opens the dispatch door: the turn looks idle, so the dispatcher sends
+    // the queued follow-up, and the server rejects it as busy.
+    let max_iterations = (crate::tui::app::App::BUSY_RECOVERY_MAX_ATTEMPTS as u32) + 20;
+    let mut dispatches = 0u32;
+    for iteration in 0..max_iterations {
+        // Force the "turn looks idle" view that lets the queued follow-up go.
+        app.is_processing = false;
+        app.status = crate::tui::app::ProcessingStatus::Idle;
+        app.current_message_id = None;
+
+        let queued_before = app.queued_messages.len();
+        rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+        let dispatched = app.queued_messages.len() < queued_before && app.is_processing;
+        if dispatched {
+            dispatches += 1;
+        } else {
+            // Nothing left to dispatch: the loop has terminated.
+            break;
+        }
+
+        // Server rejects the re-sent follow-up because the prior turn is still
+        // running. This re-queues via the bounded recovery path (or, at the cap,
+        // restores the message to the input box and stops).
+        app.handle_server_event(
+            ServerEvent::Error {
+                id: 100 + iteration as u64,
+                message: "Already processing a message".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+    }
+
+    // The whole point: the resend count is bounded, not 174. At most the initial
+    // dispatch plus BUSY_RECOVERY_MAX_ATTEMPTS recoveries.
+    let cap = crate::tui::app::App::BUSY_RECOVERY_MAX_ATTEMPTS as u32;
+    assert!(
+        dispatches <= cap + 1,
+        "busy-rejection resends must be bounded (<= {} dispatches), got {}",
+        cap + 1,
+        dispatches
+    );
+
+    // The loop must actually terminate: the queue is drained and no pending
+    // message is left armed to resend.
+    assert!(
+        app.queued_messages.is_empty(),
+        "after the busy-recovery budget is exhausted the queue must be empty, not re-armed"
+    );
+    assert!(
+        app.rate_limit_pending_message.is_none(),
+        "no pending message may be left to resend after the cap"
+    );
+    assert!(
+        !app.is_processing,
+        "the client must settle into an idle state once the storm is stopped"
+    );
+
+    // Issue #391: the user's message is never silently dropped. It is restored
+    // to the input box so a single keypress resends it.
+    assert_eq!(
+        app.input, storm_message,
+        "the queued message must be restored to the input box, not lost"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Stopped re-sending")),
+        "the user must be told the resend loop was stopped"
+    );
+
+    // Count the Message frames that actually reached the wire: the storm used to
+    // put 174 copies on the socket; now it must be bounded.
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = rt
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(50), peer.read(&mut buf)).await
+        })
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(0);
+    let wire = String::from_utf8_lossy(&buf[..n]);
+    let message_frames = wire
+        .matches("\"content\":\"stop at the next stopping point\"")
+        .count();
+    assert!(
+        message_frames as u32 <= cap + 1,
+        "the socket must carry a bounded number of copies (<= {}), got {}",
+        cap + 1,
+        message_frames
+    );
+}

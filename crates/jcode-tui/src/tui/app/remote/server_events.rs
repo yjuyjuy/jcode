@@ -1172,6 +1172,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.replay_elapsed_override = None;
                 app.remote_resume_activity = None;
                 app.batch_progress = None;
+                // A turn actually completed: clear the busy-recovery counter so a
+                // later, unrelated busy rejection starts from a fresh budget.
+                app.busy_recovery_attempts = None;
                 app.streaming_tool_calls.clear();
                 app.current_message_id = None;
                 app.thought_line_inserted = false;
@@ -1221,35 +1224,69 @@ pub(in crate::tui::app) fn handle_server_event(
             // user's queued message (issue #391). Instead, put it back on the
             // queue and re-adopt the running-turn state so the queue
             // dispatches once the real turn completes.
-            if message == "Already processing a message"
-                && recover_undelivered_queued_continuation(app, "server busy rejection")
-            {
-                app.is_processing = true;
-                app.status = ProcessingStatus::Thinking(Instant::now());
-                app.current_message_id = None;
-                app.processing_started.get_or_insert_with(Instant::now);
-                app.last_stream_activity = Some(Instant::now());
-                app.remote_resume_activity = Some(RemoteResumeActivity {
-                    session_id: app.remote_session_id.clone().unwrap_or_default(),
-                    observed_at: Instant::now(),
-                    current_tool_name: None,
-                });
-                app.set_status_notice("Server still busy; follow-up stays queued");
-                crate::logging::info(
-                    "Server rejected queued continuation because a turn is still running; re-queued it and re-adopted the running turn",
-                );
-                return true;
+            if message == "Already processing a message" {
+                match recover_undelivered_queued_continuation_bounded(app, "server busy rejection")
+                {
+                    BusyRecoveryOutcome::Recovered => {
+                        app.is_processing = true;
+                        app.status = ProcessingStatus::Thinking(Instant::now());
+                        app.current_message_id = None;
+                        app.processing_started.get_or_insert_with(Instant::now);
+                        app.last_stream_activity = Some(Instant::now());
+                        app.remote_resume_activity = Some(RemoteResumeActivity {
+                            session_id: app.remote_session_id.clone().unwrap_or_default(),
+                            observed_at: Instant::now(),
+                            current_tool_name: None,
+                        });
+                        app.set_status_notice("Server still busy; follow-up stays queued");
+                        crate::logging::info(
+                            "Server rejected queued continuation because a turn is still running; re-queued it and re-adopted the running turn",
+                        );
+                        return true;
+                    }
+                    BusyRecoveryOutcome::BudgetExhausted => {
+                        // The storm is stopped: the message was restored to the
+                        // input box and the turn must NOT be re-adopted (that is
+                        // what let the next tick re-dispatch forever). Settle
+                        // into an idle state and stop handling this event.
+                        app.is_processing = false;
+                        app.status = ProcessingStatus::Idle;
+                        app.current_message_id = None;
+                        app.processing_started = None;
+                        app.clear_visible_turn_started();
+                        return true;
+                    }
+                    BusyRecoveryOutcome::NotRecoverable => {
+                        // Fall through to the generic error handling below.
+                    }
+                }
             }
             // A rate limit must ALWAYS hold the pending turn, never drop it.
             let reset_duration =
                 super::rate_limit_hold::rate_limit_hold_duration(&message, retry_after_secs);
             if let Some(reset_duration) = reset_duration {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                // Bound the rate-limit resend loop. Each armed resend counts
+                // against a budget so a persistently overloaded/429 server can
+                // no longer drive an unbounded resend storm (one resend per
+                // retry-after window forever, stoppable only by /cancel). When
+                // the budget is exhausted, drop the pending message and fall
+                // through to the terminal error path (which surfaces the error
+                // and arms the fallback offer) instead of re-arming.
+                let budget_ok = app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .map(|pending| pending.retry_attempts < App::RATE_LIMIT_MAX_ATTEMPTS)
+                    .unwrap_or(true);
                 if let Some(is_system) = app
                     .rate_limit_pending_message
                     .as_ref()
+                    .filter(|_| budget_ok)
                     .map(|pending| pending.is_system)
                 {
+                    if let Some(pending) = app.rate_limit_pending_message.as_mut() {
+                        pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+                    }
+                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
                     let rate_limit_line =
                         app.rate_limit_notice_with_nudge(reset_duration.as_secs());
                     app.push_display_message(DisplayMessage::system(rate_limit_line));
@@ -1267,6 +1304,17 @@ pub(in crate::tui::app) fn handle_server_event(
                     remote.clear_pending();
                     remote.reset_call_output_tokens_seen();
                     return false;
+                }
+                if !budget_ok {
+                    // Exhausted the rate-limit resend budget. Stop re-arming and
+                    // let the terminal error path below take over (it clears the
+                    // pending message, restores the prompt, and offers a
+                    // one-keypress switch to a working route).
+                    app.rate_limit_reset = None;
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "🛑 Stopped auto-retrying after {} rate-limit attempts. Use `/poke` to retry manually, or switch route.",
+                        App::RATE_LIMIT_MAX_ATTEMPTS
+                    )));
                 }
             }
             let is_failover_prompt =
@@ -1617,6 +1665,7 @@ pub(in crate::tui::app) fn handle_server_event(
             if session_changed {
                 app.rate_limit_pending_message = None;
                 app.rate_limit_reset = None;
+                app.busy_recovery_attempts = None;
                 app.connection_type = None;
                 app.status_detail = None;
                 app.clear_display_messages();

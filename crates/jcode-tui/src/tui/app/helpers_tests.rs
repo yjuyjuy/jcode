@@ -25,6 +25,16 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, prev }
     }
+
+    /// Remove an env var for the duration of the guard, restoring it on drop.
+    /// Needed when a test must assert behavior that a leaked ambient variable
+    /// (e.g. the herdr multiplexer's `HERDR_ENV`/`HERDR_PANE_ID`, which
+    /// terminal detection prioritizes) would otherwise mask.
+    fn unset(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, prev }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -176,6 +186,11 @@ fn swarm_effort_display_labels_are_marked_beta() {
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
     let _env_lock = crate::storage::lock_test_env();
+    // Terminal detection checks the herdr multiplexer before TERM_PROGRAM, so a
+    // leaked ambient HERDR_ENV/HERDR_PANE_ID (present when the suite runs inside
+    // a herdr pane) would otherwise mask the handterm signal this test asserts.
+    let _herdr_env = EnvVarGuard::unset("HERDR_ENV");
+    let _herdr_pane = EnvVarGuard::unset("HERDR_PANE_ID");
     let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
     assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
 }

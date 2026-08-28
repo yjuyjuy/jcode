@@ -168,6 +168,117 @@ pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &st
     true
 }
 
+/// Outcome of a bounded busy-rejection recovery attempt.
+pub(super) enum BusyRecoveryOutcome {
+    /// The queued continuation was recovered back onto the queue; the caller
+    /// should re-adopt the running-turn state so the queue re-dispatches once
+    /// the turn is proven idle.
+    Recovered,
+    /// The pending message was not a recoverable queued continuation; the
+    /// caller should fall through to its other error handling.
+    NotRecoverable,
+    /// The per-submission busy-recovery budget is exhausted. The pending
+    /// message was dropped and its text restored to the input box (never
+    /// silently lost, per issue #391). The caller must NOT re-adopt the turn:
+    /// re-adopting would let the next tick re-dispatch and continue the storm.
+    BudgetExhausted,
+}
+
+/// Bounded busy-rejection recovery of an in-flight queued continuation.
+///
+/// The server rejects a queued follow-up with "Already processing a message"
+/// while a prior turn is still running. The normal recovery re-queues the
+/// message and re-adopts the running turn so it re-dispatches once the turn is
+/// idle. A reconnect/reload race that leaves the turn permanently "running"
+/// from the client's view turns that into an unbounded resend storm (one
+/// queued message re-sent 174 times, one send per dispatch tick).
+///
+/// This variant caps recoveries of the SAME submission (keyed on its
+/// idempotency nonce) at `App::BUSY_RECOVERY_MAX_ATTEMPTS`. Below the cap it
+/// behaves exactly like `recover_undelivered_queued_continuation`. At the cap
+/// it stops re-queuing, restores the user's text to the input box, and reports
+/// `BudgetExhausted` so the loop terminates instead of resending forever.
+pub(super) fn recover_undelivered_queued_continuation_bounded(
+    app: &mut App,
+    reason: &str,
+) -> BusyRecoveryOutcome {
+    let recovery_key = app
+        .rate_limit_pending_message
+        .as_ref()
+        .filter(|pending| {
+            pending.is_system
+                && !pending.auto_retry
+                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+        })
+        .map(|pending| {
+            // Key on the stable submission nonce so the counter follows one
+            // logical submission across re-queue hops. Fall back to the content
+            // when a nonce is absent (older path / bare reminder) so we still
+            // bound it.
+            pending
+                .submission_nonce
+                .clone()
+                .unwrap_or_else(|| pending.content.clone())
+        });
+    let Some(recovery_key) = recovery_key else {
+        return BusyRecoveryOutcome::NotRecoverable;
+    };
+
+    let attempts = match app.busy_recovery_attempts.as_mut() {
+        Some((key, count)) if *key == recovery_key => {
+            *count = count.saturating_add(1);
+            *count
+        }
+        _ => {
+            // New submission (or the previous one cleared): start its counter.
+            app.busy_recovery_attempts = Some((recovery_key.clone(), 1));
+            1
+        }
+    };
+
+    if attempts > App::BUSY_RECOVERY_MAX_ATTEMPTS {
+        // Budget exhausted: stop the storm. Drop the pending message, restore
+        // the user's text to the input box so nothing is lost, and let the
+        // caller fall through to a terminal, idle state.
+        let dropped = app.rate_limit_pending_message.take();
+        app.rate_limit_reset = None;
+        app.busy_recovered_submission = None;
+        app.busy_recovery_attempts = None;
+        if let Some(pending) = dropped {
+            if !pending.content.trim().is_empty() {
+                app.last_submitted_input
+                    .get_or_insert_with(|| pending.content.clone());
+            }
+            if let Some(reminder) = pending.system_reminder {
+                // A hidden reminder has no input-box home; keep it queued so the
+                // continuation is not lost, but the visible content is what the
+                // storm was resending, and it is now restored to the box.
+                app.hidden_queued_system_messages.insert(0, reminder);
+            }
+        }
+        app.restore_failed_input_to_box();
+        crate::logging::warn(&format!(
+            "Busy-rejection recovery budget exhausted after {} attempts ({}); stopped re-queuing and restored the message to the input box",
+            App::BUSY_RECOVERY_MAX_ATTEMPTS,
+            reason
+        ));
+        app.push_display_message(DisplayMessage::system(format!(
+            "🛑 Stopped re-sending your queued message after {} server-busy rejections. It is back in your input box; press Enter to send it again.",
+            App::BUSY_RECOVERY_MAX_ATTEMPTS
+        )));
+        app.set_status_notice("Server stayed busy; message restored to input");
+        return BusyRecoveryOutcome::BudgetExhausted;
+    }
+
+    if recover_undelivered_queued_continuation(app, reason) {
+        BusyRecoveryOutcome::Recovered
+    } else {
+        // Should not happen (the guard above already proved recoverability), but
+        // stay safe and do not claim a recovery that did not occur.
+        BusyRecoveryOutcome::NotRecoverable
+    }
+}
+
 pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> bool {
     let Some(interleave) = app.interleave_message.take() else {
         return false;
