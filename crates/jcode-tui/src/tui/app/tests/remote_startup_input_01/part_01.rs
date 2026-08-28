@@ -291,14 +291,17 @@ fn test_queue_autojudge_remote_targets_original_non_judge_session() {
         app.is_remote = true;
 
         let mut root = crate::session::Session::create(None, Some("task".to_string()));
+        root.mark_persist_intent();
         root.save().expect("save root session");
 
         let mut review =
             crate::session::Session::create(Some(root.id.clone()), Some("review".to_string()));
+        review.mark_persist_intent();
         review.save().expect("save review session");
 
         let mut judge =
             crate::session::Session::create(Some(review.id.clone()), Some("judge".to_string()));
+        judge.mark_persist_intent();
         judge.save().expect("save judge session");
 
         app.session = judge.clone();

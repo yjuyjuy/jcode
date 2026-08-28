@@ -580,6 +580,7 @@ async fn enter_creates_selfdev_session_in_test_mode() {
         compacted_count: 1,
     });
     parent.record_replay_display_message("system", None, "remember this context");
+    parent.mark_persist_intent();
     parent.save().expect("save parent session");
 
     let tool = SelfDevTool::new();
@@ -667,6 +668,7 @@ async fn reload_in_non_selfdev_session_is_upgrade_in_place() {
     let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
@@ -693,6 +695,7 @@ async fn socket_actions_require_selfdev_session() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
@@ -719,6 +722,7 @@ async fn find_config_reports_key_paths() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
@@ -745,6 +749,7 @@ async fn setup_reports_dependency_checks() {
     let repo = create_repo_fixture();
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
@@ -794,10 +799,12 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
 
     let mut session_one = session::Session::create(None, Some("First build session".to_string()));
     session_one.short_name = Some("alpha".to_string());
+    session_one.mark_persist_intent();
     session_one.save().expect("save session one");
 
     let mut session_two = session::Session::create(None, Some("Second build session".to_string()));
     session_two.short_name = Some("beta".to_string());
+    session_two.mark_persist_intent();
     session_two.save().expect("save session two");
 
     let tool = SelfDevTool::new();
@@ -870,6 +877,7 @@ async fn build_reload_waits_for_build_then_reloads() {
     let mut session = session::Session::create(None, Some("Build+reload session".to_string()));
     session.is_canary = true;
     session.short_name = Some("gamma".to_string());
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     // The reload phase blocks on a server ack. Spawn a watcher that mirrors the
@@ -928,10 +936,12 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
 
     let mut session_one = session::Session::create(None, Some("Build A".to_string()));
     session_one.short_name = Some("alpha".to_string());
+    session_one.mark_persist_intent();
     session_one.save().expect("save session one");
 
     let mut session_two = session::Session::create(None, Some("Build B".to_string()));
     session_two.short_name = Some("beta".to_string());
+    session_two.mark_persist_intent();
     session_two.save().expect("save session two");
 
     let tool = SelfDevTool::new();
@@ -988,10 +998,12 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
 
     let mut session_one = session::Session::create(None, Some("Build A".to_string()));
     session_one.short_name = Some("alpha".to_string());
+    session_one.mark_persist_intent();
     session_one.save().expect("save session one");
 
     let mut session_two = session::Session::create(None, Some("Build B".to_string()));
     session_two.short_name = Some("beta".to_string());
+    session_two.mark_persist_intent();
     session_two.save().expect("save session two");
 
     let tool = SelfDevTool::new();
@@ -1049,6 +1061,7 @@ fn status_output_prunes_stale_pending_requests() {
 
     let mut session = session::Session::create(None, Some("Stale Build".to_string()));
     session.short_name = Some("ghost".to_string());
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let stale_status_path = temp_home.path().join("missing-selfdev.status.json");
@@ -1117,6 +1130,7 @@ fn freshly_queued_request_survives_reconcile_before_task_metadata_exists() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Fresh Build".to_string()));
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let source = test_source_state(std::path::Path::new("/tmp/jcode"));
@@ -1200,6 +1214,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
             wake: true,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         },
     )
     .expect("write stale status file");
@@ -1276,6 +1291,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
 
     let mut session = session::Session::create(None, Some("Superseded Build".to_string()));
     session.short_name = Some("alpha".to_string());
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let status_path = temp_home.path().join("superseded.status.json");
@@ -1300,6 +1316,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
             wake: true,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         },
     )
     .expect("write superseded status file");
@@ -1365,6 +1382,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Racing Build".to_string()));
+    session.mark_persist_intent();
     session.save().expect("save session");
 
     let status_path = temp_home.path().join("racing.status.json");
@@ -1389,6 +1407,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
             wake: true,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         },
     )
     .expect("write running status file");

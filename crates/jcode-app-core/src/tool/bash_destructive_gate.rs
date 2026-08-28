@@ -75,6 +75,10 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
                 "type": "boolean",
                 "description": "Wake the agent when the task completes, re-driving it across a turn boundary. Defaults to true so a background task cannot silently sleep an idle agent with work in flight; pass false to opt out."
             },
+            "stall_wake_seconds": {
+                "type": "integer",
+                "description": "With run_in_background: wake the agent after this many seconds of no output/progress (min 30, resets on activity). Use for long jobs that may hang silently."
+            },
             "justification": {
                 "type": "string",
                 "description": "Only when re-issuing a command the destructive gate refused; explain which user request it serves."

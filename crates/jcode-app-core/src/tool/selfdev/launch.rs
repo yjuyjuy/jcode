@@ -44,6 +44,9 @@ pub fn enter_selfdev_session(
     session.set_canary("self-dev");
     session.working_dir = Some(repo_dir.display().to_string());
     session.status = session::SessionStatus::Closed;
+    // The spawned terminal resumes this session by id in a fresh process, so
+    // it must be durable before any conversation message exists.
+    session.mark_persist_intent();
     session.save()?;
 
     let session_id = session.id.clone();

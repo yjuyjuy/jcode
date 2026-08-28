@@ -193,7 +193,6 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
 pub const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
-const SELFDEV_FOCUS_DESKTOP2_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop2.txt");
 /// Split system prompt for efficient caching
 /// Static content is cached, dynamic content is not
 #[derive(Debug, Clone, Default)]
@@ -531,6 +530,51 @@ pub fn build_system_prompt_split_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
+    let agents_md = load_agents_md_files_from_dir(working_dir);
+    build_system_prompt_split_with_capabilities_and_agents_md(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+        agents_md,
+    )
+}
+
+/// Build a split prompt using an already captured AGENTS.md snapshot.
+///
+/// Long-lived agents use this to keep their provider-cache prefix stable when a
+/// tool edits AGENTS.md during the session. New sessions still capture the
+/// latest instructions.
+pub fn build_system_prompt_split_with_agents_md(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    agents_md: (Option<String>, ContextInfo),
+) -> (SplitSystemPrompt, ContextInfo) {
+    build_system_prompt_split_with_capabilities_and_agents_md(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        PromptCapabilities::current(),
+        agents_md,
+    )
+}
+
+fn build_system_prompt_split_with_capabilities_and_agents_md(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    capabilities: PromptCapabilities,
+    agents_md: (Option<String>, ContextInfo),
+) -> (SplitSystemPrompt, ContextInfo) {
     let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
@@ -549,7 +593,7 @@ pub fn build_system_prompt_split_with_capabilities(
     }
 
     // Add AGENTS.md instructions (static per project)
-    let (md_content, md_info) = load_agents_md_files_from_dir(working_dir);
+    let (md_content, md_info) = agents_md;
     if let Some(content) = md_content {
         static_parts.push(content);
     }
@@ -620,27 +664,17 @@ fn build_selfdev_prompt() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelfDevProductContext {
     Tui,
-    Desktop2,
 }
 
 impl SelfDevProductContext {
     fn from_working_dir(working_dir: Option<&Path>) -> Self {
-        let Some(working_dir) = working_dir else {
-            return Self::Tui;
-        };
-
-        let path = working_dir.to_string_lossy().replace('\\', "/");
-        if path.contains("/crates/jcode-desktop") || path.ends_with("crates/jcode-desktop2") {
-            Self::Desktop2
-        } else {
-            Self::Tui
-        }
+        let _ = working_dir;
+        Self::Tui
     }
 
     fn prompt_block(self) -> &'static str {
         match self {
             Self::Tui => SELFDEV_FOCUS_TUI_PROMPT,
-            Self::Desktop2 => SELFDEV_FOCUS_DESKTOP2_PROMPT,
         }
     }
 }
@@ -665,10 +699,7 @@ fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
 pub fn build_session_context(working_dir: Option<&Path>) -> String {
     let mut lines = vec!["# Session Context".to_string()];
 
-    let now_utc = chrono::Utc::now();
-    lines.push(format!("Date: {}", now_utc.format("%Y-%m-%d")));
-    lines.push(format!("Time: {} UTC", now_utc.format("%H:%M:%S")));
-    lines.push("Timezone: UTC".to_string());
+    lines.extend(session_datetime_lines());
     lines.push(format!("OS: {}", std::env::consts::OS));
     lines.push(format!("Architecture: {}", std::env::consts::ARCH));
     lines.push(format!(
@@ -690,6 +721,23 @@ pub fn build_session_context(working_dir: Option<&Path>) -> String {
     }
 
     lines.join("\n")
+}
+
+fn session_datetime_lines() -> [String; 3] {
+    std::panic::catch_unwind(|| format_session_datetime(chrono::Local::now()))
+        .unwrap_or_else(|_| format_session_datetime(chrono::Utc::now()))
+}
+
+fn format_session_datetime<Tz>(now: chrono::DateTime<Tz>) -> [String; 3]
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    [
+        format!("Date: {}", now.format("%Y-%m-%d")),
+        format!("Time: {}", now.format("%H:%M:%S")),
+        format!("Timezone: {}", now.format("%Z")),
+    ]
 }
 
 /// Get git branch and status summary

@@ -26,11 +26,10 @@ pub const DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES: usize = 64;
 ///   reasoning is hidden on re-render (the live block already streamed and was
 ///   discarded once the model answered), matching the ephemeral live behavior.
 /// - `Full`: every reasoning line is shown (classic behavior).
-fn format_reasoning_markup(text: &str) -> String {
+fn format_reasoning_markup(text: &str, mode: ReasoningDisplayMode) -> String {
     if text.trim().is_empty() {
         return String::new();
     }
-    let mode = crate::config::config().display.reasoning_display();
     match mode {
         // In both `Off` and `Current` modes persisted reasoning is not re-rendered:
         // `Current` only ever shows the live block, which is discarded once the
@@ -347,6 +346,27 @@ pub fn render_messages_and_images_with_compacted_history(
     Vec<RenderedImage>,
     Option<RenderedCompactedHistoryInfo>,
 ) {
+    render_messages_and_images_with_compacted_history_and_reasoning(
+        session,
+        compacted_history_visible,
+        crate::config::config().display.reasoning_display(),
+    )
+}
+
+/// Like [`render_messages_and_images_with_compacted_history`], but pins the
+/// reasoning-display mode instead of reading the process-global config. Used
+/// by transcript builders that must never surface hidden reasoning (for
+/// example the judge-session transcript), regardless of the user's display
+/// preference.
+pub fn render_messages_and_images_with_compacted_history_and_reasoning(
+    session: &Session,
+    compacted_history_visible: usize,
+    reasoning_mode: crate::config::ReasoningDisplayMode,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
@@ -525,7 +545,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     });
                 }
                 ContentBlock::Reasoning { text: t } | ContentBlock::ReasoningTrace { text: t } => {
-                    reasoning.push_str(&format_reasoning_markup(t));
+                    reasoning.push_str(&format_reasoning_markup(t, reasoning_mode));
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {

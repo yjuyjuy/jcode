@@ -51,11 +51,7 @@ impl Tool for CompactContextTool {
     }
 
     fn description(&self) -> &str {
-        "Compact your own conversation context now, summarizing older messages to \
-         free up the context window. Acts only on your current session. Useful \
-         when you are deep in a long task and want to proactively reclaim space \
-         instead of waiting for automatic compaction. The summary is applied at \
-         the end of the current turn."
+        "Compact your own conversation to free up context; applies at turn end."
     }
 
     fn parameters_schema(&self) -> Value {

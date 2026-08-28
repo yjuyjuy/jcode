@@ -4,6 +4,7 @@ fn test_improve_mode_persists_in_session_file() {
         let mut session = crate::session::Session::create(None, None);
         session.improve_mode = Some(crate::session::SessionImproveMode::ImprovePlan);
         let session_id = session.id.clone();
+        session.mark_persist_intent();
         session.save().expect("save session");
 
         let loaded = crate::session::Session::load(&session_id).expect("load session");

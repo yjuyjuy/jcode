@@ -1580,9 +1580,22 @@ pub enum MemorySubcommand {
 }
 
 pub fn run_memory_command(cmd: MemorySubcommand) -> Result<()> {
+    run_memory_command_for_dir(cmd, std::env::current_dir().ok())
+}
+
+fn run_memory_command_for_dir(
+    cmd: MemorySubcommand,
+    project_dir: Option<std::path::PathBuf>,
+) -> Result<()> {
     use memory::{MemoryEntry, MemoryManager};
 
-    let manager = MemoryManager::new();
+    let project_dir = project_dir.filter(|dir| !dir.as_os_str().is_empty());
+    // Match agent-side memory resolution: project memory is available only when
+    // the caller supplied a concrete working directory.
+    let manager = match project_dir.as_ref() {
+        Some(dir) => MemoryManager::new().with_project_dir(dir),
+        _ => MemoryManager::new(),
+    };
 
     match cmd {
         MemorySubcommand::List { scope, tag } => {
@@ -1720,6 +1733,9 @@ pub fn run_memory_command(cmd: MemorySubcommand) -> Result<()> {
             scope,
             overwrite,
         } => {
+            if scope != "global" && project_dir.is_none() {
+                anyhow::bail!("cannot import project memories without a project directory");
+            }
             let content = std::fs::read_to_string(&input)?;
             let memories: Vec<memory::MemoryEntry> = serde_json::from_str(&content)?;
 
@@ -1727,6 +1743,7 @@ pub fn run_memory_command(cmd: MemorySubcommand) -> Result<()> {
             let mut skipped = 0;
 
             for entry in memories {
+                let entry_id = entry.id.clone();
                 let result = if scope == "global" {
                     if !overwrite
                         && let Ok(graph) = manager.load_global_graph()
@@ -1747,9 +1764,12 @@ pub fn run_memory_command(cmd: MemorySubcommand) -> Result<()> {
                     manager.remember_project(entry)
                 };
 
-                if result.is_ok() {
-                    imported += 1;
-                }
+                result.map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to durably import memory {entry_id} into {scope} scope: {error}"
+                    )
+                })?;
+                imported += 1;
             }
 
             println!("Imported {} memories ({} skipped)", imported, skipped);
@@ -1956,6 +1976,14 @@ pub async fn run_browser(action: &str) -> Result<()> {
             } else if status.responding && !status.compatible {
                 println!(
                     "\nThe browser bridge is connected, but the installed Firefox extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
+                );
+            } else if status.binary_installed && !browser::is_firefox_running() {
+                println!(
+                    "\nFirefox is not running, so the bridge cannot respond. Start Firefox (or run a browser tool action, which launches it automatically), then re-check status. Setup is one-time and does not need to be re-run."
+                );
+            } else if status.binary_installed {
+                println!(
+                    "\nFirefox is running, but the bridge is not responding. Check that the Browser Agent Bridge extension is enabled in the running profile. Run `jcode browser setup` only to repair the install."
                 );
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
@@ -2453,25 +2481,49 @@ pub async fn run_single_message_command(
         wait_for_cold_cache_mcp_tools(&registry).await;
     }
     let mut agent = crate::agent::Agent::new(provider.clone(), registry);
-    restore_agent_session_if_requested(&mut agent, resume_session)?;
-
-    if emit_json {
-        let text = run_single_message_command_capture_with_auto_poke(&mut agent, message).await?;
-        let report = RunCommandReport {
-            session_id: agent.session_id().to_string(),
-            provider: provider.name().to_string(),
-            model: provider.model(),
-            text,
-            usage: agent.last_usage().clone(),
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if emit_ndjson {
-        run_single_message_command_ndjson(&mut agent, provider.clone(), message).await?;
-    } else {
-        run_single_message_command_plain_with_auto_poke(&mut agent, message).await?;
+    if let Err(error) = restore_agent_session_if_requested(&mut agent, resume_session) {
+        agent.mark_closed();
+        return Err(error);
     }
 
-    Ok(())
+    run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
+}
+
+async fn run_single_message_with_agent(
+    agent: &mut crate::agent::Agent,
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+    message: &str,
+    emit_json: bool,
+    emit_ndjson: bool,
+) -> Result<()> {
+    let result: Result<()> = async {
+        if emit_json {
+            let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
+            let report = RunCommandReport {
+                session_id: agent.session_id().to_string(),
+                provider: provider.name().to_string(),
+                model: provider.model(),
+                text,
+                usage: agent.last_usage().clone(),
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else if emit_ndjson {
+            run_single_message_command_ndjson(agent, provider, message).await?;
+        } else {
+            run_single_message_command_plain_with_auto_poke(agent, message).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    // `Agent::new` and session restore both register this process as the active
+    // owner. Unlike the interactive lifecycle, `jcode run` has no later quit
+    // path to close the session. Finalize after output has been emitted, while
+    // returning the original command result unchanged. This prevents a normal
+    // one-shot exit from looking like a stale-PID crash on the next startup
+    // (issue #988).
+    agent.mark_closed();
+    result
 }
 
 fn run_command_auto_poke_enabled() -> bool {

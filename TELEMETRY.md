@@ -95,9 +95,17 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | Field | Example | Purpose |
 |-------|---------|----------|
 | `event` | `"feedback"` | Event type |
-| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback explicitly submitted with `/feedback ...` |
+| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback submitted with `/feedback ...` or the `maintainer_feedback` agent tool |
 | `feedback_rating` | `"up"` / `"down"` | Legacy explicit product sentiment, if present |
 | `feedback_reason` | `"slow"` | Legacy optional coarse reason bucket, if present |
+
+The `maintainer_feedback` tool is available only as another explicit telemetry
+path: it obeys the same telemetry opt-out as `/feedback` and sends no event when
+telemetry is disabled. Its schema tells the agent to paraphrase, omit secrets and
+private data, and label whether the report originated with the user, the agent,
+or both. User-originated and mixed reports are rejected unless the user explicitly
+approved sharing them; agent-only technical observations do not need per-report
+approval. Jcode does not attach transcript content, repository files, or paths.
 
 ### Sponsored Discovery Event
 
@@ -110,9 +118,9 @@ without exposing prompts or a persistent telemetry identifier to that service.
 |-------|---------|----------|
 | `event` | `"discovery"` | Event type |
 | `request_id` | `"9a23..."` | Random correlation ID scoped to one request |
-| `phase` | `"browse"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `suggest` records a missing catalog capability proposal |
+| `phase` | `"browse"` / `"details"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `details` records investigation without selection and `suggest` records a missing catalog capability proposal |
 | `category` | `"payments"` | Fixed discovery category, when valid |
-| `selected_tool` | `"agentcard"` | Public catalog tool name in the select phase |
+| `selected_tool` | `"agentcard"` | Public catalog tool name in the details or select phase |
 | `outcome` | `"success"` / `"failure"` | Attempt result |
 | `failure_reason` | `"timeout"` | Allowlisted coarse failure class only |
 | `http_status` | `200` | Discovery service response status, if received |
@@ -318,10 +326,17 @@ Most events also carry a few coarse quality / cleanup fields:
 | `event_id` | `"uuid"` | Deduplication |
 | `session_id` | `"uuid"` | Joins session-scoped events together |
 | `schema_version` | `3` | Forward-compatible parsing |
-| `build_channel` | `"release"` / `"selfdev"` / `"local_build"` | Filter out dev/test usage |
+| `build_channel` | `"release"` / `"ci_release"` / `"selfdev"` / `"local_build"` | Separate installed releases, CI/CD-built releases, and dev/test usage |
 | `is_git_checkout` | `true/false` | Distinguish source-tree usage from installed usage |
 | `is_ci` | `true/false` | Filter CI noise |
 | `ran_from_cargo` | `true/false` | Filter local dev launches |
+
+CI/CD jobs should set `JCODE_CI=1` when running jcode. `JCODE_CI=0` explicitly
+marks a run as non-CI and overrides inherited provider variables. When this
+setting is absent, jcode falls back to common provider markers such as `CI`,
+`GITHUB_ACTIONS`, `GITLAB_CI`, and `BUILDKITE`. Build provenance is independent:
+official release workflows set `JCODE_CI_BUILD=1` while compiling, producing the
+`ci_release` channel without classifying later end-user executions as CI.
 
 ## What We Do NOT Collect
 

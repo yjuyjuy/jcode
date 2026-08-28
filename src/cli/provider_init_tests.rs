@@ -141,6 +141,76 @@ async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
     crate::auth::AuthStatus::invalidate_cache();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
+async fn explicit_openai_api_choice_overrides_configured_compatible_default() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let keys = [
+        "JCODE_HOME",
+        "OPENAI_API_KEY",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ];
+    let saved: Vec<(&str, Option<String>)> = keys
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("OPENAI_API_KEY", "sk-openai-api-test");
+    for key in keys.iter().skip(2) {
+        crate::env::remove_var(key);
+    }
+    std::fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[provider]
+default_provider = "local-gateway"
+default_model = "gateway-default"
+
+[providers.local-gateway]
+type = "openai-compatible"
+base_url = "http://localhost:1234/v1"
+auth = "none"
+default_model = "gateway-default"
+requires_api_key = false
+"#,
+    )
+    .expect("write competing configured provider default");
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+
+    let provider = init_provider_for_validation(&ProviderChoice::OpenaiApi, Some("gpt-5.6-luna"))
+        .await
+        .expect("explicit OpenAI API provider should override configured defaults");
+
+    assert_eq!(provider.active_auth_method_label(), Some("API key"));
+    assert_eq!(provider.model(), "gpt-5.6-luna");
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("openai-api")
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(key, value);
+        } else {
+            crate::env::remove_var(key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
 #[test]
 fn test_server_bootstrap_login_selection_preserves_order() {
     let providers = provider_catalog::server_bootstrap_login_providers();
@@ -216,7 +286,7 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    assert_eq!(provider.name(), "Jcode Subscription");
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -902,6 +972,9 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     ] {
         crate::env::remove_var(key);
     }
+    // A parallel test may have populated the process-global auth-status cache
+    // with the real machine's credentials; re-resolve against the sandbox.
+    crate::auth::AuthStatus::invalidate_cache();
 
     let opencode_path = crate::auth::claude::ExternalClaudeAuthSource::OpenCode
         .path()

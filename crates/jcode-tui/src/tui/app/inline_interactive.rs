@@ -23,6 +23,10 @@ use helpers::{
     save_agent_model_override,
 };
 
+pub(super) fn subagent_picker_model_spec(entry: &PickerEntry) -> String {
+    model_entry_saved_spec(entry)
+}
+
 const REMOTE_MODEL_CATALOG_CACHE_FILE: &str = "remote_model_catalog_cache.json";
 const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 3;
 const REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
@@ -107,13 +111,16 @@ use placeholder_routes::route_supports_reasoning_effort;
 /// "openai-compatible:myprofile"), or a bare openai-compatible profile id
 /// ("myprofile"). Matching is case/format-insensitive via the shared provider
 /// label normalizer. Routes for the active model are always kept so the
-/// current selection never disappears from the picker, and a filter that
+/// current selection never disappears from the picker, but only when their
+/// provider and API method match the active route. A filter that
 /// matches nothing falls back to the unfiltered list instead of an empty
 /// picker.
 fn filter_routes_by_provider_allowlist(
     routes: Vec<crate::provider::ModelRoute>,
     allowlist: Option<&[String]>,
     current_model: &str,
+    current_provider: &str,
+    current_api_method: Option<&str>,
 ) -> Vec<crate::provider::ModelRoute> {
     use crate::provider::normalize_model_route_provider_label as normalize;
 
@@ -147,9 +154,17 @@ fn filter_routes_by_provider_allowlist(
         })
     };
 
+    let route_is_current = |route: &crate::provider::ModelRoute| {
+        route.model == current_model
+            && crate::provider::model_route_provider_labels_match(&route.provider, current_provider)
+            && current_api_method.is_none_or(|api_method| {
+                crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                    == crate::provider::ModelRouteApiMethod::parse(api_method)
+            })
+    };
     let filtered: Vec<crate::provider::ModelRoute> = routes
         .iter()
-        .filter(|route| route.model == current_model || route_matches(route))
+        .filter(|route| route_is_current(route) || route_matches(route))
         .cloned()
         .collect();
     if filtered.is_empty() {
@@ -565,6 +580,56 @@ fn model_picker_route_is_default(
 }
 
 impl App {
+    fn configure_subagent_model_picker(
+        picker: &mut InlineInteractiveState,
+        configured: Option<&str>,
+    ) {
+        picker.entries.retain(|entry| {
+            !matches!(
+                entry.action,
+                PickerAction::SubagentModelChoice { inherit: true }
+            )
+        });
+        for entry in &mut picker.entries {
+            let spec = model_entry_saved_spec(entry);
+            entry.action = PickerAction::SubagentModelChoice { inherit: false };
+            entry.is_current = configured
+                .is_some_and(|saved| saved == spec || saved == model_entry_base_name(entry));
+            entry.is_default = false;
+        }
+        picker.entries.insert(
+            0,
+            PickerEntry {
+                name: "inherit (current active model)".to_string(),
+                options: vec![PickerOption {
+                    provider: "session".to_string(),
+                    api_method: "subagent_model".to_string(),
+                    available: true,
+                    detail: "use the current active model".to_string(),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: PickerAction::SubagentModelChoice { inherit: true },
+                selected_option: 0,
+                is_current: configured.is_none(),
+                is_default: false,
+                is_favorite: false,
+                recommended: false,
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: None,
+            },
+        );
+        picker.filtered = (0..picker.entries.len()).collect();
+        picker.selected = picker
+            .entries
+            .iter()
+            .position(|entry| entry.is_current)
+            .unwrap_or(0);
+        picker.column = 0;
+    }
+
     pub(super) fn remote_model_catalog_snapshot(
         &self,
     ) -> jcode_provider_core::ModelCatalogSnapshot {
@@ -1087,7 +1152,18 @@ impl App {
             self.invalidate_model_picker_cache();
         }
 
-        if self.is_remote && self.remote_model_options.is_empty() {
+        // During remote startup the authoritative session catalog has not
+        // arrived yet. Do not make an old persisted catalog look current just
+        // because the user opened `/model` quickly after spawning the client.
+        let awaiting_initial_remote_catalog = self.is_remote
+            && self.remote_startup_phase.is_some()
+            && self.remote_model_options.is_empty()
+            && self.remote_available_entries.is_empty();
+
+        if self.is_remote
+            && !awaiting_initial_remote_catalog
+            && self.remote_model_options.is_empty()
+        {
             self.hydrate_remote_model_catalog_cache();
         }
 
@@ -1098,6 +1174,11 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
+
+        if awaiting_initial_remote_catalog {
+            self.open_loading_model_picker(&current_model);
+            return;
+        }
 
         // Never present the old catalog as authoritative immediately after a
         // login/import. Local mode clears this when the provider's synchronous
@@ -1504,6 +1585,14 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
+        let current_provider = if self.is_remote {
+            self.remote_provider_name
+                .clone()
+                .unwrap_or_else(|| "remote".to_string())
+        } else {
+            self.provider.display_name()
+        };
+        let current_api_method = self.current_route_api_method();
         let config = crate::config::config();
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
@@ -1557,6 +1646,8 @@ impl App {
             routes,
             config.provider.model_picker_providers.as_deref(),
             &current_model,
+            &current_provider,
+            current_api_method.as_deref(),
         );
 
         if routes.is_empty() {
@@ -1640,13 +1731,6 @@ impl App {
             }
         }
 
-        let current_provider = if self.is_remote {
-            self.remote_provider_name
-                .clone()
-                .unwrap_or_else(|| "remote".to_string())
-        } else {
-            self.provider.name().to_string()
-        };
         let recent_auth_provider = self
             .recent_authenticated_provider
             .as_ref()
@@ -1951,6 +2035,9 @@ impl App {
                     picker.filter.clone(),
                     picker.selected,
                     picker.column,
+                    picker.entries.iter().any(|entry| {
+                        matches!(entry.action, PickerAction::SubagentModelChoice { .. })
+                    }),
                 ))
             } else {
                 None
@@ -1984,9 +2071,15 @@ impl App {
             preview: false,
         });
 
-        if let Some((preview, filter, selected, column)) = previous_picker
+        if let Some((preview, filter, selected, column, subagent_model)) = previous_picker
             && let Some(ref mut picker) = self.inline_interactive_state
         {
+            if subagent_model {
+                Self::configure_subagent_model_picker(
+                    picker,
+                    self.session.subagent_model.as_deref(),
+                );
+            }
             picker.preview = preview;
             picker.filter = filter;
             picker.selected = selected.min(picker.filtered.len().saturating_sub(1));
@@ -3516,6 +3609,26 @@ impl App {
                             }
                         }
                     }
+                    PickerAction::SubagentModelChoice { inherit } => {
+                        self.inline_interactive_state = None;
+                        if inherit {
+                            self.session.subagent_model = None;
+                            self.set_status_notice("Subagent model: inherit");
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Subagent model reset to inherit the current model ({}).",
+                                self.provider.model()
+                            )));
+                        } else {
+                            let spec = model_entry_saved_spec(&entry);
+                            self.session.subagent_model = Some(spec.clone());
+                            self.set_status_notice(format!("Subagent model → {}", spec));
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Subagent model pinned to {} for this session.",
+                                spec
+                            )));
+                        }
+                        let _ = self.session.save();
+                    }
                     PickerAction::Model => {
                         if !route.available {
                             self.push_display_message(DisplayMessage::error(
@@ -3690,9 +3803,14 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let Some(ref mut picker) = self.inline_interactive_state
-                    && !c.is_whitespace()
+                    // Spaces separate independently matched search terms. The
+                    // token matcher already permits those terms to appear in
+                    // any order, so dropping whitespace here made that
+                    // capability impossible to use from the picker.
+                    && (!c.is_whitespace()
+                        || (!picker.filter.is_empty() && !picker.filter.ends_with(' ')))
                 {
-                    picker.filter.push(c);
+                    picker.filter.push(if c.is_whitespace() { ' ' } else { c });
                     Self::apply_inline_interactive_filter(picker);
                 }
             }
@@ -4382,6 +4500,8 @@ mod tests {
             routes.clone(),
             Some(&["Llama.CPP".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model, "qwen3-coder");
@@ -4391,6 +4511,8 @@ mod tests {
             routes.clone(),
             Some(&["llamacpp".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].provider, "llama.cpp");
@@ -4400,6 +4522,8 @@ mod tests {
             routes.clone(),
             Some(&["claude-oauth".to_string(), "openrouter".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         let models: Vec<&str> = filtered.iter().map(|r| r.model.as_str()).collect();
         assert_eq!(models, ["claude-fable-5", "deepseek/deepseek-v4-pro"]);
@@ -4417,6 +4541,8 @@ mod tests {
             routes.clone(),
             Some(&["llamacpp".to_string()]),
             "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth"),
         );
         let models: Vec<&str> = filtered.iter().map(|r| r.model.as_str()).collect();
         assert_eq!(models, ["gpt-5.5", "qwen3-coder"]);
@@ -4426,20 +4552,30 @@ mod tests {
             routes.clone(),
             Some(&["nonexistent".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         assert_eq!(filtered.len(), routes.len());
 
         // None / empty / blank-entry allowlists are no-ops.
         assert_eq!(
-            filter_routes_by_provider_allowlist(routes.clone(), None, "x").len(),
+            filter_routes_by_provider_allowlist(routes.clone(), None, "x", "OpenAI", None).len(),
             2
         );
         assert_eq!(
-            filter_routes_by_provider_allowlist(routes.clone(), Some(&[]), "x").len(),
+            filter_routes_by_provider_allowlist(routes.clone(), Some(&[]), "x", "OpenAI", None,)
+                .len(),
             2
         );
         assert_eq!(
-            filter_routes_by_provider_allowlist(routes, Some(&["  ".to_string()]), "x").len(),
+            filter_routes_by_provider_allowlist(
+                routes,
+                Some(&["  ".to_string()]),
+                "x",
+                "OpenAI",
+                None,
+            )
+            .len(),
             2
         );
     }

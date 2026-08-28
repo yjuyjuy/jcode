@@ -409,6 +409,7 @@ mod tests {
             swarm_info: None,
             background_info: None,
             usage_info: None,
+            usage_display_used: false,
             tokens_per_second: None,
             provider_name: None,
             account_label: None,

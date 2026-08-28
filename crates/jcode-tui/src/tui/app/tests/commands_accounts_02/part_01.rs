@@ -266,9 +266,11 @@ fn test_account_command_opens_account_picker() {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
-                }) if provider_id == "claude" && label == "claude-1"
+                }) if provider_id == "claude" && label == "claude-otter"
             )
         }));
+        assert!(picker.entries.iter().any(|entry| entry.name == "Claude"));
+        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI"));
         assert!(picker.entries.iter().any(|entry| {
             matches!(
                 entry.action,
@@ -334,6 +336,9 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
             .as_ref()
             .expect("inline account picker should open")
             .selected;
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Otter"));
+        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Fox"));
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
@@ -451,7 +456,7 @@ fn test_account_command_combines_claude_and_openai_accounts() {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
-                }) if provider_id == "claude" && label == "claude-1"
+                }) if provider_id == "claude" && label == "claude-otter"
             )
         }));
         assert!(picker.entries.iter().any(|entry| {
@@ -460,7 +465,7 @@ fn test_account_command_combines_claude_and_openai_accounts() {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
-                }) if provider_id == "openai" && label == "openai-1"
+                }) if provider_id == "openai" && label == "openai-otter"
             )
         }));
         assert!(
@@ -539,9 +544,11 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             app.input = "/account switch openai2".to_string();
             app.submit_input();
 
+            // Upstream relabels accounts to canonical animal names on load
+            // (openai-otter, openai-fox, ...) instead of numeric suffixes.
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
-                Some("openai-1")
+                Some(crate::auth::account_store::canonical_account_label("openai", 1).as_str())
             );
         });
     });

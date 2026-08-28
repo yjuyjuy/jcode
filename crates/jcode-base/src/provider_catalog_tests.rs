@@ -27,6 +27,59 @@ impl Drop for EnvGuard {
 }
 
 #[test]
+fn anthropic_catalog_auth_uses_api_key_and_version_headers() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://api.anthropic.com/v1/models"),
+        "https://api.anthropic.com/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.headers().get("x-api-key").unwrap(), "test-key");
+    assert_eq!(
+        request.headers().get("anthropic-version").unwrap(),
+        ANTHROPIC_VERSION_HEADER_VALUE
+    );
+    assert!(request.headers().get("authorization").is_none());
+}
+
+#[test]
+fn anthropic_catalog_auth_detects_host_case_insensitively() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://api.anthropic.com/v1/models"),
+        "https://API.ANTHROPIC.COM/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.headers().get("x-api-key").unwrap(), "test-key");
+    assert_eq!(
+        request.headers().get("anthropic-version").unwrap(),
+        ANTHROPIC_VERSION_HEADER_VALUE
+    );
+}
+
+#[test]
+fn generic_catalog_auth_uses_bearer_header() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://example.com/v1/models"),
+        "https://example.com/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(
+        request.headers().get("authorization").unwrap(),
+        "Bearer test-key"
+    );
+    assert!(request.headers().get("x-api-key").is_none());
+    assert!(request.headers().get("anthropic-version").is_none());
+}
+
+#[test]
 fn matrix_profiles_have_unique_ids_and_safe_metadata() {
     let mut ids = HashSet::new();
     for profile in openai_compatible_profiles() {
@@ -92,7 +145,7 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");
     assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
-    assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(MINIMAX_PROFILE.api_key_env, "MINIMAX_API_KEY");
     assert_eq!(
         ALIBABA_CODING_PLAN_PROFILE.api_base,
         "https://coding-intl.dashscope.aliyuncs.com/v1"
@@ -196,7 +249,10 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
 #[test]
 fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_international_default() {
     let _lock = crate::storage::lock_test_env();
-    let _guard = EnvGuard::save(&["OPENAI_API_KEY"]);
+    let _guard = EnvGuard::save(&["JCODE_HOME", "MINIMAX_API_KEY", "OPENAI_API_KEY"]);
+    let home = tempfile::tempdir().expect("temporary JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("MINIMAX_API_KEY");
     crate::env::remove_var("OPENAI_API_KEY");
 
     let international = resolve_openai_compatible_profile(MINIMAX_PROFILE);
@@ -212,6 +268,11 @@ fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_internatio
     );
     assert_eq!(china.api_base, MINIMAX_CHINA_API_BASE);
     assert_eq!(china.setup_url, MINIMAX_CHINA_SETUP_URL);
+
+    crate::env::set_var("OPENAI_API_KEY", "sk-cp-legacy-token");
+    let legacy = resolve_openai_compatible_profile(MINIMAX_PROFILE);
+    assert_eq!(legacy.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(legacy.api_base, MINIMAX_CHINA_API_BASE);
 }
 
 #[test]
@@ -1141,10 +1202,10 @@ fn open_weight_family_context_limits_match_published_windows() {
 }
 
 #[test]
-fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
+fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
     // Regression for #407: `default_provider = "minimax"` (the built-in MiniMax
     // profile) must resolve credentials from the profile's documented
-    // OPENAI_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
+    // MINIMAX_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
     // openrouter.env. The earlier bug surfaced as
     // "OPENROUTER_API_KEY not found ..." when applying the configured
     // default_model.
@@ -1181,8 +1242,8 @@ fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
         std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
             .ok()
             .as_deref(),
-        Some("OPENAI_API_KEY"),
-        "MiniMax profile must use OPENAI_API_KEY, not OPENROUTER_API_KEY"
+        Some("MINIMAX_API_KEY"),
+        "MiniMax profile must use MINIMAX_API_KEY, not OPENROUTER_API_KEY"
     );
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),

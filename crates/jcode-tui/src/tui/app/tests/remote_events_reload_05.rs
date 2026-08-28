@@ -161,11 +161,16 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
 
         // Pin the default so the clean-cycle finish disarms rather than
         // re-arming; this test is about the spike-challenge flag, not the
-        // default-on re-arm behavior.
+        // default-on re-arm behavior. The finished cycle now fires one
+        // synthetic final-response turn before re-arming per the default.
         reloaded_app.auto_poke_default_on = false;
-        assert!(!reloaded_app.schedule_auto_poke_followup_if_needed());
+        assert!(reloaded_app.schedule_auto_poke_followup_if_needed());
+        assert!(reloaded_app.todo_final_response_requested);
         assert!(!reloaded_app.auto_poke_incomplete_todos);
-        assert!(!reloaded_app.todo_confidence_spike_challenged);
+        assert!(
+            reloaded_app.todo_confidence_spike_challenged,
+            "the spike challenge latch must survive until the next incomplete cycle"
+        );
         assert!(reloaded_app.hidden_queued_system_messages.is_empty());
     });
 }
@@ -307,8 +312,12 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
         )
         .expect("save remote goal assessment");
 
-        assert!(!app.schedule_auto_poke_followup_if_needed());
-        assert!(app.queued_messages.is_empty());
+        // Everything passes, so no gate fires; the clean-cycle finish queues
+        // the one synthetic final-response turn instead.
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].contains("Quality checks passed"));
     });
 }
 
@@ -534,12 +543,19 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
                 .is_empty()
         );
 
-        // Simulate the turn running, then the cycle completing.
+        // Simulate the turn running, then the cycle completing. The finished
+        // cycle fires the one synthetic final-response turn and re-arms the
+        // review for later work.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "with nothing left outstanding the cycle should finish"
+            app.schedule_auto_poke_followup_if_needed(),
+            "the clean-cycle finish should queue the final response"
+        );
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(
+            app.queued_messages[0]
+                .starts_with(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         );
         assert!(
             !app.todo_gate_digest_delivered,
@@ -671,7 +687,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             }],
         )
         .expect("save passing goal");
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        // The clean-cycle finish fires the synthetic final-response turn.
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.todo_final_response_requested);
         assert!(
             app.auto_poke_incomplete_todos,
             "default-on auto-poke should cover the next batch of work too"
@@ -697,7 +715,10 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         )
         .expect("save passing goal");
         app.auto_poke_incomplete_todos = true; // pretend a stale arm survived
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        // The armed cycle fires its one synthetic final-response turn, then the
+        // re-arm honors the /poke off state.
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.todo_final_response_requested);
         assert!(
             !app.auto_poke_incomplete_todos,
             "/poke off must not be undone by the default-on re-arm"

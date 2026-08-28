@@ -852,6 +852,7 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
         Some("remote cached model".to_string()),
     );
     session.model = Some("gpt-5.4".to_string());
+    session.mark_persist_intent();
     session.save().expect("save remote session");
 
     let app = App::new_for_remote(Some(session_id.to_string()));
@@ -884,6 +885,7 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
         Some("remote cached model".to_string()),
     );
     session.model = Some("gpt-5.4".to_string());
+    session.mark_persist_intent();
     session.save().expect("save remote session");
 
     let mut app = App::new_for_remote(Some(session_id.to_string()));

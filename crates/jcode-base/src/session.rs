@@ -59,10 +59,11 @@ use memory_profile::{
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
 pub use render::{
-    RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
-    RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
-    render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
-    summarize_tool_calls,
+    DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES, RenderedCompactedHistoryInfo, RenderedImage,
+    RenderedImageAnchor, RenderedImageSource, RenderedMessage, has_rendered_images,
+    is_attached_image_label_text, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history,
+    render_messages_and_images_with_compacted_history_and_reasoning, summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 #[cfg(test)]
@@ -174,6 +175,13 @@ pub struct Session {
     /// Optional user-provided label for saved sessions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_label: Option<String>,
+    /// Process-local intent that this session must be persisted even when it
+    /// carries no visible conversation message yet (daemon-prepared sessions
+    /// such as agents, spawn targets, and headless debug sessions). The
+    /// untouched-session skip in `Session::save` stays effective for raw panel
+    /// scaffolding, which never marks this.
+    #[serde(default)]
+    pub persist_intent: bool,
     /// Environment snapshots for post-mortem debugging
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_snapshots: Vec<EnvSnapshot>,
@@ -757,6 +765,7 @@ impl Session {
             is_debug,
             saved: false,
             save_label: None,
+            persist_intent: false,
             env_snapshots: Vec::new(),
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
@@ -811,6 +820,7 @@ impl Session {
             is_debug,
             saved: false,
             save_label: None,
+            persist_intent: false,
             env_snapshots: Vec::new(),
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
@@ -834,6 +844,15 @@ impl Session {
         if self.status == SessionStatus::Active {
             self.sync_internal_presence_flag();
         }
+    }
+
+    /// Mark this session as intentionally persistent even before it carries
+    /// any visible conversation message. Daemon-prepared sessions (agents,
+    /// visible spawn targets, headless debug sessions) call this so their
+    /// metadata survives restarts; the untouched-session skip then only
+    /// applies to raw panel scaffolding.
+    pub fn mark_persist_intent(&mut self) {
+        self.persist_intent = true;
     }
 
     /// Save/bookmark this session with an optional label

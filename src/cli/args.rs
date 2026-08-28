@@ -81,6 +81,11 @@ pub(crate) struct Args {
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 
+    /// Launch the normal TUI, skip onboarding, then autoplay a safe simulation
+    /// of receiving, downloading, installing, and restarting after an update.
+    #[arg(long = "update-sim")]
+    pub(crate) update_sim: bool,
+
     /// Custom socket path for server/client communication
     #[arg(long, global = true)]
     pub(crate) socket: Option<String>,
@@ -113,6 +118,14 @@ pub(crate) struct Args {
     /// Hide all built-in tools unless --tools or [tools].enabled opts tools back in.
     #[arg(long, global = true)]
     pub(crate) disable_base_tools: bool,
+
+    /// MCP tool exposure mode: auto, eager, or deferred.
+    #[arg(long, global = true, value_parser = ["auto", "eager", "deferred"])]
+    pub(crate) mcp_tools: Option<String>,
+
+    /// Token estimate at which --mcp-tools=auto switches to deferred exposure.
+    #[arg(long, global = true, value_name = "TOKENS")]
+    pub(crate) mcp_tools_token_threshold: Option<usize>,
 
     #[command(subcommand)]
     pub(crate) command: Option<Command>,

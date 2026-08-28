@@ -322,6 +322,9 @@ fn system_reminders_are_hidden_by_default_and_opt_in_searchable() {
             vec![text("display-role-needle")],
             Some(StoredDisplayRole::System),
         );
+        // The only user message is an internal system reminder, so the
+        // untouched-session skip would discard the fixture; mark it durable.
+        session.mark_persist_intent();
         session.save().expect("save system session");
 
         let options = SearchOptions::for_test("current-session");

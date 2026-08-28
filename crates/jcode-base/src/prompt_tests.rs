@@ -197,6 +197,58 @@ fn agents_md_distinct_project_and_global_files_are_both_loaded() {
 }
 
 #[test]
+fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let agents_md = project_dir.path().join("AGENTS.md");
+    std::fs::write(&agents_md, "original session instructions").unwrap();
+    let snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+
+    let (before, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        snapshot.clone(),
+    );
+    std::fs::write(&agents_md, "instructions written during the session").unwrap();
+    let (after, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        snapshot,
+    );
+
+    assert_eq!(before.static_part, after.static_part);
+    assert!(after.static_part.contains("original session instructions"));
+    assert!(
+        !after
+            .static_part
+            .contains("instructions written during the session")
+    );
+
+    // A new session/workspace boundary captures a fresh snapshot rather than
+    // pinning the old instructions forever.
+    let fresh_snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let (next_session, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        fresh_snapshot,
+    );
+    assert!(
+        next_session
+            .static_part
+            .contains("instructions written during the session")
+    );
+    assert_ne!(before.static_part, next_session.static_part);
+}
+
+#[test]
 fn agents_md_missing_global_file_keeps_project_instructions() {
     let project_dir = tempfile::TempDir::new().unwrap();
     let global_dir = tempfile::TempDir::new().unwrap();
@@ -360,12 +412,41 @@ fn test_session_context_includes_time_timezone_and_system_info() {
     let context = build_session_context(None);
     assert!(context.contains("# Session Context"));
     assert!(context.contains("Time: "));
-    assert!(context.contains("Timezone: UTC"));
+    assert!(context.contains("Timezone: "));
     assert!(context.contains("OS: "));
     assert!(context.contains("Architecture: "));
     assert!(context.contains("Jcode version: "));
     assert!(!context.contains("Working directory: "));
     assert!(!context.contains("Git:"));
+}
+
+#[test]
+fn session_datetime_uses_the_supplied_local_date_time_and_offset() {
+    use chrono::TimeZone;
+
+    let local = chrono::FixedOffset::east_opt(5 * 60 * 60 + 30 * 60)
+        .unwrap()
+        .with_ymd_and_hms(2026, 8, 23, 0, 10, 9)
+        .unwrap();
+
+    assert_eq!(
+        format_session_datetime(local),
+        ["Date: 2026-08-23", "Time: 00:10:09", "Timezone: +05:30",]
+    );
+}
+
+#[test]
+fn session_datetime_formats_utc_fallback_deterministically() {
+    use chrono::TimeZone;
+
+    let utc = chrono::Utc
+        .with_ymd_and_hms(2026, 8, 22, 18, 40, 6)
+        .unwrap();
+
+    assert_eq!(
+        format_session_datetime(utc),
+        ["Date: 2026-08-22", "Time: 18:40:06", "Timezone: UTC"]
+    );
 }
 
 #[test]
@@ -565,15 +646,6 @@ fn test_selfdev_prompt_uses_full_selfdev_instructions() {
 }
 
 #[test]
-fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
-    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop_dir));
-    assert!(prompt.contains("launched from the jcode-desktop2"));
-    assert!(prompt.contains("selfdev build target=desktop2"));
-    assert!(!prompt.contains("launched from the TUI/root jcode context"));
-}
-
-#[test]
 fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
     let repo_dir = std::path::Path::new("/tmp/jcode");
     let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir));
@@ -679,15 +751,6 @@ fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
     assert!(EffortKind::SwarmLight.is_swarm_mode());
     assert!(EffortKind::SwarmDeep.is_swarm_mode());
     assert!(!EffortKind::Reasoning.is_swarm_mode());
-}
-
-#[test]
-fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
-    let desktop2_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop2_dir));
-    assert!(prompt.contains("launched from the jcode-desktop2"));
-    assert!(prompt.contains("selfdev build target=desktop2"));
-    assert!(!prompt.contains("launched from the TUI/root jcode context"));
 }
 
 #[test]
