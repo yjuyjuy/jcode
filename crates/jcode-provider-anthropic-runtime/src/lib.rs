@@ -2147,7 +2147,7 @@ async fn force_refresh_oauth_token(
 /// Stream the response from Anthropic API
 #[expect(
     clippy::too_many_arguments,
-    reason = "streaming needs auth token, request, event sink, model/session identity, and transport config together"
+    reason = "streaming requires transport, authentication, request, event, and session context"
 )]
 async fn stream_response(
     client: Client,

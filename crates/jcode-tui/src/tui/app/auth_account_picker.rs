@@ -1,3 +1,4 @@
+use super::auth_account_picker_saved_accounts::{account_display_name, anthropic_account_use};
 use super::*;
 
 impl App {
@@ -532,7 +533,7 @@ impl App {
                 selected = idx;
             }
             models.push(crate::tui::PickerEntry {
-                name: account.label.clone(),
+                name: account_display_name("Claude", &account.label, claude_accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
                     api_method: if is_active {
@@ -541,7 +542,13 @@ impl App {
                         "saved".to_string()
                     },
                     available: true,
-                    detail: format!("{} - {} - plan {}", email, status, plan),
+                    detail: format!(
+                        "{} - {} - {} - plan {}",
+                        email,
+                        anthropic_account_use(account.subscription_type.as_deref()),
+                        status,
+                        plan
+                    ),
                     estimated_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
@@ -581,7 +588,7 @@ impl App {
                 selected = idx;
             }
             models.push(crate::tui::PickerEntry {
-                name: account.label.clone(),
+                name: account_display_name("OpenAI", &account.label, openai_accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
                     api_method: if is_active {
@@ -790,7 +797,7 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let plan = account.subscription_type.as_deref().unwrap_or("unknown");
             models.push(crate::tui::PickerEntry {
-                name: account.label.clone(),
+                name: account_display_name("Claude", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
                     api_method: if is_active {
@@ -799,7 +806,13 @@ impl App {
                         "saved".to_string()
                     },
                     available: true,
-                    detail: format!("{} - {} - plan {}", email, status, plan),
+                    detail: format!(
+                        "{} - {} - {} - plan {}",
+                        email,
+                        anthropic_account_use(account.subscription_type.as_deref()),
+                        status,
+                        plan
+                    ),
                     estimated_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
@@ -940,7 +953,7 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             models.push(crate::tui::PickerEntry {
-                name: account.label.clone(),
+                name: account_display_name("OpenAI", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
                     api_method: if is_active {

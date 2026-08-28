@@ -499,9 +499,12 @@ pub enum NamedProviderType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NamedProviderAuth {
+    #[serde(alias = "Bearer", alias = "BEARER")]
     #[default]
     Bearer,
+    #[serde(alias = "Header", alias = "HEADER")]
     Header,
+    #[serde(alias = "None", alias = "NONE")]
     None,
 }
 
@@ -509,6 +512,18 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Explicitly enable or disable `/effort` for this model. When omitted,
+    /// the provider-level setting and built-in model-family detection apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// Reasoning effort selected when this model becomes active. This overrides
+    /// `[provider].openai_reasoning_effort` for this model only.
+    #[serde(
+        default,
+        alias = "reasoning-effort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<String>,
     #[serde(
         default,
         alias = "context_limit",
@@ -566,6 +581,10 @@ pub struct NamedProviderConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub supports_reasoning_effort: Option<bool>,
+    /// Disable model-name based reasoning detection for this profile. Explicit
+    /// provider/model capability settings continue to work.
+    #[serde(default, alias = "disable-reasoning-heuristics")]
+    pub disable_reasoning_heuristics: bool,
 }
 
 impl Default for NamedProviderConfig {
@@ -588,6 +607,7 @@ impl Default for NamedProviderConfig {
             models: Vec::new(),
             extra_body: None,
             supports_reasoning_effort: None,
+            disable_reasoning_heuristics: false,
         }
     }
 }
@@ -1038,6 +1058,8 @@ pub struct KeybindingsConfig {
     pub scroll_prompt_down: String,
     /// Scroll bookmark toggle key (default: "ctrl+g")
     pub scroll_bookmark: String,
+    /// Toggle auto-poke (default: "ctrl+p"). Set "" to disable.
+    pub auto_poke_toggle: String,
     /// Scroll up fallback key (default: unset; Cmd+K moves up by prompt on macOS)
     pub scroll_up_fallback: String,
     /// Scroll down fallback key (default: unset; Cmd+J moves down by prompt on macOS)
@@ -1104,6 +1126,7 @@ impl Default for KeybindingsConfig {
             scroll_prompt_up: get("scroll_prompt_up", "ctrl+["),
             scroll_prompt_down: get("scroll_prompt_down", "ctrl+]"),
             scroll_bookmark: get("scroll_bookmark", "ctrl+g"),
+            auto_poke_toggle: get("auto_poke_toggle", "ctrl+p"),
             scroll_up_fallback: get("scroll_up_fallback", ""),
             scroll_down_fallback: get("scroll_down_fallback", ""),
             workspace_left: get("workspace_left", "alt+h"),

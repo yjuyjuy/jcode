@@ -27,6 +27,7 @@ impl Config {
 - Prompt up: `{}`
 - Prompt down: `{}`
 - Scroll bookmark: `{}`
+- Auto-poke toggle: `{}`
 - Workspace left: `{}`
 - Workspace down: `{}`
 - Workspace up: `{}`
@@ -80,6 +81,8 @@ impl Config {
 - Enabled allow-list: {}
 - Disabled tools: {}
 - Disable base tools: {}
+- MCP tools: {}
+- MCP auto threshold: {} tokens
 
 **Provider:**
 - Default model: {}
@@ -143,6 +146,11 @@ impl Config {
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
+            if self.keybindings.auto_poke_toggle.trim().is_empty() {
+                "disabled"
+            } else {
+                self.keybindings.auto_poke_toggle.trim()
+            },
             self.keybindings.workspace_left,
             self.keybindings.workspace_down,
             self.keybindings.workspace_up,
@@ -238,6 +246,8 @@ impl Config {
                 effective_disabled_tools.join(", ")
             },
             self.tools.disable_base_tools,
+            self.tools.mcp_tools.as_str(),
+            self.tools.mcp_tools_token_threshold,
             self.provider
                 .default_model
                 .as_deref()

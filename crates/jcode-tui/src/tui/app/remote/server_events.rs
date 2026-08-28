@@ -2,6 +2,7 @@ use super::*;
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
+use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
@@ -1769,6 +1770,10 @@ pub(in crate::tui::app) fn handle_server_event(
             if catalog_outcome.catalog_changed {
                 app.persist_remote_model_catalog_cache();
             }
+            // `/model` may have been opened while the initial session catalog
+            // was still loading. Replace that loading row as soon as history
+            // supplies the authoritative snapshot.
+            app.refresh_open_model_picker_after_catalog_update();
             app.remote_skills = skills;
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
@@ -1978,6 +1983,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.pending_images.clear();
                     app.set_status_notice("Reload complete - prompt preserved");
                 }
+                restore_pending_startup_prompt_echo(app);
                 app.note_runtime_memory_event_force("history_loaded", "remote_history_applied");
                 crate::process_memory::release_retained_heap("client_history_loaded");
                 if let Some(notice) = app.pending_remote_rewind_notice.take() {
@@ -2487,14 +2493,31 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.mark_soft_interrupt_injected(&content);
             let role = display_role.unwrap_or_else(|| "user".to_string());
-            app.push_display_message(DisplayMessage {
-                role,
-                content: content.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            if role == "background_task" {
+                if let Some(completed) =
+                    crate::message::parse_background_task_notification_markdown(&content)
+                {
+                    let status = if completed.status.contains("completed") {
+                        crate::tui::BackgroundTaskRowStatus::Completed
+                    } else {
+                        crate::tui::BackgroundTaskRowStatus::Failed
+                    };
+                    let label = crate::message::background_task_display_label(
+                        &completed.tool_name,
+                        completed.display_name.as_deref(),
+                    );
+                    app.finish_background_task(completed.task_id, label, status);
+                }
+            } else {
+                app.push_display_message(DisplayMessage {
+                    role,
+                    content: content.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             if let Some(n) = tools_skipped {
                 app.set_status_notice(format!("⚡ {} tool(s) skipped", n));
             }
@@ -2575,11 +2598,23 @@ pub(in crate::tui::app) fn handle_server_event(
                 if crate::message::parse_background_task_progress_notification_markdown(&message)
                     .is_some()
                 {
-                    app.upsert_background_task_progress_message(message.clone());
+                    app.upsert_running_background_task_progress(&message);
                 } else {
-                    app.push_display_message(DisplayMessage::background_task(message.clone()));
+                    if let Some(completed) =
+                        crate::message::parse_background_task_notification_markdown(&message)
+                    {
+                        let status = if completed.status.contains("completed") {
+                            crate::tui::BackgroundTaskRowStatus::Completed
+                        } else {
+                            crate::tui::BackgroundTaskRowStatus::Failed
+                        };
+                        let label = crate::message::background_task_display_label(
+                            &completed.tool_name,
+                            completed.display_name.as_deref(),
+                        );
+                        app.finish_background_task(completed.task_id, label, status);
+                    }
                 }
-                persist_replay_display_message(app, "background_task", None, &message);
                 app.set_status_notice(presentation.status_notice);
                 return false;
             }
@@ -2608,13 +2643,14 @@ pub(in crate::tui::app) fn handle_server_event(
                         )
                 {
                     let status_notice = progress.summary.clone();
-                    app.upsert_background_task_progress_message(message.clone());
-                    persist_replay_display_message(app, "background_task", None, &message);
+                    app.upsert_running_background_task_progress(&message);
                     app.set_status_notice(status_notice);
                     return false;
                 } else if scope == "background_activity" {
-                    app.push_display_message(DisplayMessage::background_task(message.clone()));
-                    persist_replay_display_message(app, "background_task", None, &message);
+                    if !app.upsert_running_background_task_started(&message) {
+                        app.push_display_message(DisplayMessage::background_task(message.clone()));
+                        persist_replay_display_message(app, "background_task", None, &message);
+                    }
                 } else {
                     app.push_display_message(DisplayMessage::system(message.clone()));
                     persist_replay_display_message(app, "system", None, &message);

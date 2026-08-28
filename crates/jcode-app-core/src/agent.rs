@@ -187,6 +187,10 @@ pub struct Agent {
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
+    /// MCP top-level definition exposure policy captured when the session starts.
+    mcp_tools_mode: crate::config::McpToolsMode,
+    /// Auto-mode token estimate above which MCP definitions are deferred.
+    mcp_tools_token_threshold: usize,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
     /// Last upstream provider (OpenRouter) observed for this session
@@ -234,6 +238,9 @@ pub struct Agent {
     mcp_late_register_resolved: bool,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
+    /// AGENTS.md is session bootstrap input. Keep the captured text stable so
+    /// tool writes do not mutate the provider's cacheable prefix mid-session.
+    agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -261,6 +268,15 @@ pub struct Agent {
 }
 
 impl Agent {
+    fn refresh_agents_md_snapshot(&mut self) {
+        let working_dir = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new);
+        self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+    }
+
     fn should_track_client_cache(&self) -> bool {
         match std::env::var("JCODE_TRACK_CLIENT_CACHE") {
             Ok(value) => {
@@ -279,6 +295,9 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let skills = SkillRegistry::shared_snapshot();
+        let tool_config = &crate::config::config().tools;
+        let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
         let agent = Self {
             provider,
@@ -288,6 +307,8 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             disabled_tools,
+            mcp_tools_mode: tool_config.mcp_tools,
+            mcp_tools_token_threshold: tool_config.mcp_tools_token_threshold,
             provider_session_id: None,
             last_upstream_provider: None,
             last_connection_type: None,
@@ -305,6 +326,7 @@ impl Agent {
             locked_tools: None,
             mcp_late_register_resolved: false,
             system_prompt_override: None,
+            agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
@@ -580,6 +602,17 @@ impl Agent {
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
         self.pre_compact_flow_ran = false;
+    }
+
+    /// Synchronize the remote client's selected skill, accepting only names
+    /// present in the daemon's own registry snapshot.
+    pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
+        let skills = self.current_skills_snapshot();
+        let recognized = active_skill
+            .as_ref()
+            .is_none_or(|name| skills.get(name).is_some());
+        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        recognized
     }
 
     /// Synchronize the remote client's selected skill, accepting only names

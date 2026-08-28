@@ -353,6 +353,7 @@ impl RemoteConnection {
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history,
             allow_session_takeover,
+            crash_on_disconnect: false,
             terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
         })
         .await?;
@@ -596,6 +597,25 @@ impl RemoteConnection {
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)
+    }
+
+    /// Send a user message carrying an optional active skill, without an
+    /// idempotency key.
+    pub async fn send_message_with_images_reminder_and_skill(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        active_skill: Option<String>,
+    ) -> Result<u64> {
+        self.send_message_with_images_reminder_skill_and_nonce(
+            content,
+            images,
+            system_reminder,
+            active_skill,
+            None,
+        )
+        .await
     }
 
     /// Request server reload
@@ -1308,6 +1328,11 @@ impl RemoteConnection {
     #[cfg(test)]
     pub(crate) fn take_dummy_peer(&mut self) -> Option<Stream> {
         self._dummy_peer.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_request_id_for_test(&self) -> u64 {
+        self.next_request_id
     }
 
     /// Set session ID
