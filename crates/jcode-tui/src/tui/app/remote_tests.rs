@@ -1376,7 +1376,9 @@ fn busy_rejection_reloop_resends_queued_message_is_bounded() {
         .and_then(|r| r.ok())
         .unwrap_or(0);
     let wire = String::from_utf8_lossy(&buf[..n]);
-    let message_frames = wire.matches("\"content\":\"stop at the next stopping point\"").count();
+    let message_frames = wire
+        .matches("\"content\":\"stop at the next stopping point\"")
+        .count();
     assert!(
         message_frames as u32 <= cap + 1,
         "the socket must carry a bounded number of copies (<= {}), got {}",
@@ -1384,4 +1386,3 @@ fn busy_rejection_reloop_resends_queued_message_is_bounded() {
         message_frames
     );
 }
-

@@ -1225,10 +1225,8 @@ pub(in crate::tui::app) fn handle_server_event(
             // queue and re-adopt the running-turn state so the queue
             // dispatches once the real turn completes.
             if message == "Already processing a message" {
-                match recover_undelivered_queued_continuation_bounded(
-                    app,
-                    "server busy rejection",
-                ) {
+                match recover_undelivered_queued_continuation_bounded(app, "server busy rejection")
+                {
                     BusyRecoveryOutcome::Recovered => {
                         app.is_processing = true;
                         app.status = ProcessingStatus::Thinking(Instant::now());

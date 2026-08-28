@@ -259,7 +259,8 @@ pub(super) fn recover_undelivered_queued_continuation_bounded(
         app.restore_failed_input_to_box();
         crate::logging::warn(&format!(
             "Busy-rejection recovery budget exhausted after {} attempts ({}); stopped re-queuing and restored the message to the input box",
-            App::BUSY_RECOVERY_MAX_ATTEMPTS, reason
+            App::BUSY_RECOVERY_MAX_ATTEMPTS,
+            reason
         ));
         app.push_display_message(DisplayMessage::system(format!(
             "🛑 Stopped re-sending your queued message after {} server-busy rejections. It is back in your input box; press Enter to send it again.",
