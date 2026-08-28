@@ -143,6 +143,8 @@ pub(crate) fn take_session_compaction_request(session_id: &str) -> bool {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(session_id)
+}
+
 /// Apply the current session policy to an MCP server tool invoked through a
 /// fixed deferred surface. Explicitly enabling the fixed surface authorizes its
 /// underlying MCP calls, while per-tool allow/deny entries remain effective.

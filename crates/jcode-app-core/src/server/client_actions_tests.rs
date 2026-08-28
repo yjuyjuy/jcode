@@ -238,6 +238,9 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
 
     assert!(swarm_enabled);
     assert!(swarm_coordinators.read().await.is_empty());
+    // Root sessions own a default swarm keyed by their session id (the
+    // working-dir-derived swarm ids were retired; JCODE_SWARM_ID is the opt-in
+    // to a shared swarm).
     assert_eq!(
         swarm_members
             .read()
@@ -245,7 +248,7 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
             .get(session_id)
             .and_then(|member| member.swarm_id.clone())
             .as_deref(),
-        Some("/tmp/jcode-passive-swarm")
+        Some("session:session_test_swarm_toggle")
     );
     assert_eq!(
         swarm_members

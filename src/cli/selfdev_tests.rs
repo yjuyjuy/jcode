@@ -161,6 +161,9 @@ async fn test_selfdev_session_and_registry() {
     let mut session = session::Session::create(None, Some("Test E2E".to_string()));
     session.set_canary("test-build");
     let session_id = session.id.clone();
+    // The daemon skips persisting untouched sessions; this test session is
+    // intentionally durable, so mark it like daemon-prepared sessions are.
+    session.mark_persist_intent();
     session.save().expect("Failed to save session");
 
     let loaded = session::Session::load(&session_id).expect("Failed to load session");

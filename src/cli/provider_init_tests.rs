@@ -286,7 +286,7 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    assert_eq!(provider.name(), "Jcode Subscription");
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -972,6 +972,9 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     ] {
         crate::env::remove_var(key);
     }
+    // A parallel test may have populated the process-global auth-status cache
+    // with the real machine's credentials; re-resolve against the sandbox.
+    crate::auth::AuthStatus::invalidate_cache();
 
     let opencode_path = crate::auth::claude::ExternalClaudeAuthSource::OpenCode
         .path()

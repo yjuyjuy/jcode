@@ -299,6 +299,12 @@ impl Agent {
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
+        let mut session = session;
+        // Every agent-owned session is intentionally durable: it may carry
+        // operational metadata (provider pin, model, effort, interrupt state)
+        // before the first visible conversation message exists, and that state
+        // must survive a daemon restart.
+        session.mark_persist_intent();
         let agent = Self {
             provider,
             registry,
@@ -602,17 +608,6 @@ impl Agent {
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
         self.pre_compact_flow_ran = false;
-    }
-
-    /// Synchronize the remote client's selected skill, accepting only names
-    /// present in the daemon's own registry snapshot.
-    pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
-        let skills = self.current_skills_snapshot();
-        let recognized = active_skill
-            .as_ref()
-            .is_none_or(|name| skills.get(name).is_some());
-        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
-        recognized
     }
 
     /// Synchronize the remote client's selected skill, accepting only names

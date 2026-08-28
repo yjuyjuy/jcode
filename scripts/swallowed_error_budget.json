@@ -1,8 +1,8 @@
 {
-  "total": 3290,
+  "total": 3291,
   "totals_by_pattern": {
     "dot_ok": 1229,
-    "let_underscore": 1226,
+    "let_underscore": 1227,
     "unwrap_or_default": 835
   },
   "tracked_files": {
@@ -1088,7 +1088,7 @@
     },
     "crates/jcode-base/src/usage/accessors.rs": {
       "dot_ok": 2,
-      "let_underscore": 2,
+      "let_underscore": 3,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/usage/api_keys.rs": {

@@ -45,10 +45,12 @@ fn capture_current_snapshot_includes_active_sessions_only() {
     let mut active = Session::create(None, Some("Active".to_string()));
     active.working_dir = Some("/tmp".to_string());
     active.mark_active_with_pid(std::process::id());
+    active.mark_persist_intent();
     active.save().expect("save active session");
 
     let mut closed = Session::create(None, Some("Closed".to_string()));
     closed.mark_closed();
+    closed.mark_persist_intent();
     closed.save().expect("save closed session");
 
     let snapshot = capture_current_snapshot().expect("capture snapshot");
@@ -63,6 +65,7 @@ fn save_and_load_snapshot_round_trip() {
 
     let mut active = Session::create(None, Some("Restore Me".to_string()));
     active.mark_active_with_pid(std::process::id());
+    active.mark_persist_intent();
     active.save().expect("save active session");
 
     let saved = save_current_snapshot().expect("save snapshot");
@@ -79,6 +82,7 @@ fn set_auto_restore_updates_saved_snapshot() {
 
     let mut active = Session::create(None, Some("Auto Restore".to_string()));
     active.mark_active_with_pid(std::process::id());
+    active.mark_persist_intent();
     active.save().expect("save active session");
     save_current_snapshot().expect("save snapshot");
 
@@ -93,6 +97,7 @@ fn clear_snapshot_removes_saved_file() {
 
     let mut active = Session::create(None, Some("Clear Me".to_string()));
     active.mark_active_with_pid(std::process::id());
+    active.mark_persist_intent();
     active.save().expect("save active session");
     save_current_snapshot().expect("save snapshot");
 
@@ -119,6 +124,7 @@ fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
     );
     crashed.working_dir = Some("/tmp".to_string());
     crashed.mark_active_with_pid(dead_pid);
+    crashed.mark_persist_intent();
     crashed.save().expect("save crashed session");
 
     let snapshot = arm_auto_restore_from_recent_crashes()

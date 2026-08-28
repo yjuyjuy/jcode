@@ -253,20 +253,3 @@ mod tests {
         assert!(used.usage_display_used());
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::DisplayConfig;
-
-    #[test]
-    fn todos_are_pinned_by_default_but_can_be_disabled() {
-        assert!(DisplayConfig::default().pin_todos);
-
-        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
-        assert!(missing.pin_todos);
-
-        let disabled: DisplayConfig =
-            serde_json::from_str(r#"{"pin_todos":false}"#).expect("display config");
-        assert!(!disabled.pin_todos);
-    }
-}

@@ -401,6 +401,7 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         todo_items: Vec::new(),
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }]);
+    seed.mark_persist_intent();
     seed.save().unwrap();
 
     let mut child = Session::create_with_id(
@@ -425,10 +426,12 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         vec![seed.id.clone(), child.id.clone()],
         None,
     );
+    child.mark_persist_intent();
     child.save().unwrap();
 
     let mut unrelated = Session::create_with_id("session_other".to_string(), None, None);
     unrelated.working_dir = Some("/tmp/other".to_string());
+    unrelated.mark_persist_intent();
     unrelated.save().unwrap();
 
     let loaded = load_swarm_sessions("session_seed", false).unwrap();

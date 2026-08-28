@@ -855,6 +855,9 @@ mod tests {
             None,
             Some("Generated session title".to_string()),
         );
+        // The daemon skips persisting untouched sessions; this test session is
+        // intentionally durable, so mark it like daemon-prepared sessions are.
+        session.mark_persist_intent();
         session.save().expect("save session");
         crate::todo::save_todos(
             session_id,

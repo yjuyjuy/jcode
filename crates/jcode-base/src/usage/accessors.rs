@@ -190,18 +190,54 @@ pub fn fetch_usage_for_account_sync(
         return Ok(cached);
     }
 
-    if tokio::runtime::Handle::try_current().is_err() {
-        anyhow::bail!("Anthropic usage refresh requires a Tokio runtime")
-    }
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| anyhow::anyhow!("Anthropic usage refresh requires a Tokio runtime"))?;
 
-    let result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(fetch_usage_for_account(
-            account_label.to_string(),
-            access_token.to_string(),
-            refresh_token.to_string(),
-            expires_at,
-        ))
-    });
+    // The multi-threaded runtime supports in-place blocking, which avoids a
+    // thread hop on the hot rotation path.
+    let result = if matches!(
+        handle.runtime_flavor(),
+        tokio::runtime::RuntimeFlavor::MultiThread
+    ) {
+        tokio::task::block_in_place(|| {
+            handle.block_on(fetch_usage_for_account(
+                account_label.to_string(),
+                access_token.to_string(),
+                refresh_token.to_string(),
+                expires_at,
+            ))
+        })
+    } else {
+        // current_thread runtime: `block_in_place` panics there, so drive the
+        // same fetch on a dedicated thread with its own short-lived runtime.
+        // Only single-threaded callers (tests, one-shot CLI hosts) take this
+        // path; the daemon runs multi-threaded.
+        let account_label = account_label.to_string();
+        let access_token = access_token.to_string();
+        let refresh_token = refresh_token.to_string();
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("anthropic-usage-probe".to_string())
+            .spawn(move || {
+                let result = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| anyhow::anyhow!("failed to build probe runtime: {error}"))
+                    .and_then(|runtime| {
+                        runtime.block_on(fetch_usage_for_account(
+                            account_label,
+                            access_token,
+                            refresh_token,
+                            expires_at,
+                        ))
+                    });
+                let _ = result_tx.send(result);
+            })
+            .map_err(|error| anyhow::anyhow!("failed to spawn probe thread: {error}"))?;
+        result_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("probe thread dropped its result"))?
+    };
 
     if let Ok(ref data) = result {
         store_anthropic_usage(cache_key, data.clone());
@@ -385,15 +421,6 @@ pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageDat
     // non-active routing token can never read/write the active account's shared
     // record. L1 keeps this fetch de-duplicated within the session.
     fetch_anthropic_usage_data(access_token.to_string(), cache_key, None).await
-}
-
-/// Fetch the current Anthropic OAuth usage for an already-resolved access
-/// token. This is used on the request path when model-scoped quota affects
-/// routing. Unlike [`get`], it waits for the first fetch instead of returning
-/// an empty snapshot while a background refresh starts.
-pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageData> {
-    let cache_key = anthropic_usage_cache_key(access_token, None);
-    fetch_anthropic_usage_data(access_token.to_string(), cache_key).await
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)

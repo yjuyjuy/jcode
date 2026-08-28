@@ -916,6 +916,7 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
         None,
         None,
     );
+    restored_session.mark_persist_intent();
     restored_session.save().expect("save restored session");
 
     seed_transient_session_state(&mut agent);
@@ -2137,13 +2138,19 @@ fn setup_pre_compact_env(
 ) -> (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
     let prev_action = std::env::var_os("JCODE_PRE_COMPACT_ACTION");
     let prev_blocking = std::env::var_os("JCODE_BLOCKING_COMPACT");
+    let prev_threshold = std::env::var_os("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS");
     crate::env::set_var("JCODE_PRE_COMPACT_ACTION", action);
     if blocking {
         crate::env::set_var("JCODE_BLOCKING_COMPACT", "on");
     } else {
         crate::env::remove_var("JCODE_BLOCKING_COMPACT");
     }
+    // Pin the soft threshold to the historical 0.80 * budget default so an
+    // ambient user config (auto_compact_threshold_tokens) cannot move the
+    // trigger out from under these tests.
+    crate::env::set_var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS", "");
     crate::config::invalidate_config_cache();
+    let _ = prev_threshold;
     (prev_action, prev_blocking)
 }
 
@@ -2161,6 +2168,7 @@ fn restore_pre_compact_env(
     } else {
         crate::env::remove_var("JCODE_BLOCKING_COMPACT");
     }
+    crate::env::remove_var("JCODE_AUTO_COMPACT_THRESHOLD_TOKENS");
     crate::config::invalidate_config_cache();
 }
 

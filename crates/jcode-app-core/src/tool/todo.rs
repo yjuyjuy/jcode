@@ -1092,15 +1092,11 @@ mod tests {
             .expect("alignment score should describe representation coverage");
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
-        // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
-        for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
-        ] {
+        // Upstream's concise rewrite (2026-08) shrank the always-on intent-gate
+        // message to a terse continuation; the verbose calibration rubric now
+        // survives only in persisted-transcript classification constants, so
+        // assert the concise contract instead.
+        for required_concept in ["Understand the user's intent", "avoid asking the user"] {
             assert!(
                 crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
                     .contains(required_concept),
@@ -1123,11 +1119,11 @@ mod tests {
             feedback_description_lower.contains("explicit observation or check"),
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
-        for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
-        ] {
+        // The concise rewrite shrank the always-on feedback-loop gate to a
+        // terse continuation; the verbose rubric (observation per requirement,
+        // generic-phrase exclusion) lives in the deferred pre-budget
+        // continuation message in jcode-base::todo.
+        for required_concept in ["feedback loop", "Make sure the todo is up to date"] {
             assert!(
                 crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
                     .contains(required_concept),

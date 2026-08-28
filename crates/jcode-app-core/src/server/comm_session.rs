@@ -99,6 +99,10 @@ fn create_visible_spawn_session(
     if selfdev_requested {
         session.set_canary("self-dev");
     }
+    // The headed client attaches to this prepared session by id and may do so
+    // in a fresh process, so the prepared metadata must be on disk even though
+    // no conversation message exists yet.
+    session.mark_persist_intent();
     session.save()?;
 
     Ok((session.id.clone(), cwd))

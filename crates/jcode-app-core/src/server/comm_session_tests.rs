@@ -659,6 +659,7 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     session.model = Some("claude-opus-4-6".to_string());
     session.provider_key = Some("claude-api".to_string());
     session.route_api_method = Some("claude-api".to_string());
+    session.mark_persist_intent();
     session.save().expect("persist coordinator session");
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
