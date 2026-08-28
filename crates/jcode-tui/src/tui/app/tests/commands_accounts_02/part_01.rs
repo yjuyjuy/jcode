@@ -544,9 +544,11 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             app.input = "/account switch openai2".to_string();
             app.submit_input();
 
+            // Upstream relabels accounts to canonical animal names on load
+            // (openai-otter, openai-fox, ...) instead of numeric suffixes.
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
-                Some("openai-1")
+                Some(crate::auth::account_store::canonical_account_label("openai", 1).as_str())
             );
         });
     });

@@ -59,10 +59,11 @@ use memory_profile::{
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
 pub use render::{
-    RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
-    RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
-    render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
-    summarize_tool_calls,
+    DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES, RenderedCompactedHistoryInfo, RenderedImage,
+    RenderedImageAnchor, RenderedImageSource, RenderedMessage, has_rendered_images,
+    is_attached_image_label_text, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history,
+    render_messages_and_images_with_compacted_history_and_reasoning, summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 #[cfg(test)]

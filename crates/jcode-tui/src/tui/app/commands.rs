@@ -375,6 +375,9 @@ pub(super) fn create_transfer_session_from_parent(
     child.testing_build = parent.testing_build.clone();
     child.status = crate::session::SessionStatus::Closed;
     child.provider_session_id = None;
+    // The transfer child must be durable before any conversation message
+    // exists: the resumed session is a new process that attaches by id.
+    child.mark_persist_intent();
     child.save()?;
     crate::todo::save_todos(&child.id, &todos)?;
     Ok((child.id.clone(), child.display_name().to_string()))

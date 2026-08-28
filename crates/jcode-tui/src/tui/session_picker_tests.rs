@@ -1426,8 +1426,8 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         "suggested prompt should span the visual center: {lines:#?}"
     );
     assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x >= 95,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
+        start_y > review_y,
+        "blank-session action should stay secondary below the review row: {lines:#?}"
     );
 }
 

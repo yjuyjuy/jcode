@@ -959,14 +959,21 @@ fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
             })
             .unwrap();
         }
-        crate::auth::claude::set_active_account("claude-3").unwrap();
+        // Upstream relabels accounts to canonical animal names on load
+        // (claude-otter, claude-gecko, ...) instead of numeric suffixes, so
+        // target the canonical label of the third account.
+        let third = crate::auth::account_store::canonical_account_label("claude", 3);
+        crate::auth::claude::set_active_account(&third).unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
             .unwrap()
             .into_iter()
             .map(|account| account.label)
             .collect();
-        assert_eq!(labels, vec!["claude-1", "claude-2", "claude-3"]);
+        let expected: Vec<String> = (1..=3)
+            .map(|index| crate::auth::account_store::canonical_account_label("claude", index))
+            .collect();
+        assert_eq!(labels, expected);
 
         assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
         assert!(crate::auth::claude::list_accounts().unwrap().is_empty());

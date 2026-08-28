@@ -173,7 +173,15 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
 
-    for rendered in crate::session::render_messages(parent_session) {
+    // Pin reasoning display off: hidden provider reasoning must never reach a
+    // judge transcript, regardless of the user's display preference.
+    for rendered in crate::session::render_messages_and_images_with_compacted_history_and_reasoning(
+        parent_session,
+        crate::session::DEFAULT_VISIBLE_COMPACTED_HISTORY_MESSAGES,
+        crate::config::ReasoningDisplayMode::Off,
+    )
+    .0
+    {
         match rendered.role.as_str() {
             "user" => {
                 if !rendered.content.trim().is_empty() {
