@@ -125,6 +125,15 @@ healthy sibling and force a cross-provider prompt. The failover pass
 (`complete_with_failover`, `provider/mod.rs`) tries sibling accounts before any
 cross-provider proposal; regression tests live in
 `provider/tests/reactive_switch_stays_on_claude.rs`.
+## Session persistence intent
+
+Upstream skips persisting sessions whose only content is the hidden session-context
+message ("untouched sessions"). Daemon-prepared sessions that must be durable before
+any user message exists opt out with `Session::mark_persist_intent()` (set in
+`Agent::build_base`, visible-spawn preparation, and the selfdev launch path); raw
+panel scaffolding never marks it. Test fixtures that assert on-disk state must mark
+the intent too, or `Session::load` fails with ENOENT.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
