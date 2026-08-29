@@ -51,6 +51,26 @@ instead of reaching GitHub, and updates happen only via the manual
 build-review-swap runbook (`jcode self-dev --build`). The `JCODE_NO_AUTO_UPDATE`
 kill switch is preserved but independent.
 
+## Rate-limit / usage-cap error vocabulary (keep in sync)
+
+The Anthropic 5-hour OAuth cap is an HTTP 429 `rate_limit_error` whose body text
+varies ("usage limit reached", "quota exceeded", ...). Several matchers must stay
+in sync on that vocabulary: `is_rate_limit_error` (the reactive account-switch
+gate) and `is_fable_scoped_limit_error` in
+`crates/jcode-provider-anthropic-runtime/src/lib.rs`, the TUI auto-poke matcher
+in `crates/jcode-tui/src/tui/app/commands_auto_poke_errors.rs`, and
+`error_looks_like_usage_limit` in
+`crates/jcode-base/src/provider/account_failover.rs`. Reuse that shared
+vocabulary; do not invent a new spelling list.
+
+The 5h cap surfaces MID-STREAM (anthropic `complete()` has already returned
+`Ok(stream)`), so it never reaches the `complete_on_provider`-Err path that
+`try_same_provider_account_failover` watches. The anthropic runtime retry loop
+therefore calls `jcode_base::provider::reactive_switch_on_rate_limit` directly to
+switch to a sibling account with headroom (cache-only probe, per-provider
+cooldown) and retry the same model. This coexists with the between-turns
+`try_same_provider_account_failover` and the cross-provider countdown failover.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

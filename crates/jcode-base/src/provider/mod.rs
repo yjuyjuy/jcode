@@ -37,6 +37,7 @@ use account_failover::{
     same_provider_account_candidates, same_provider_account_failover_enabled,
     set_account_override_for_provider,
 };
+pub use account_failover::reactive_switch_on_rate_limit;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]

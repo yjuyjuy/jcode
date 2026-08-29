@@ -1869,6 +1869,68 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Reactive account switch on a capacity cap (HTTP 429 OR a
+                // 5-hour / usage-window cap that presents as "usage limit
+                // reached"). This means THIS account is capped, not that the
+                // request itself is bad, so before waiting out any retry-after
+                // backoff, try to switch to a sibling account with headroom and
+                // retry immediately on it - same model, no user prompt.
+                //
+                // Gated on `is_rate_limit_error` (a capacity cap), placed BEFORE
+                // the transient-retry block: a 429 / usage-window cap IS
+                // retryable here (it reaches this loop because the mid-stream
+                // bail treats "rate_limit" as retryable), but switching accounts
+                // is strictly better than backing off on the same capped
+                // account. Only on an OAuth (account-scoped) request; an API-key
+                // request has no account to switch. `reactive_switch_on_rate_limit`
+                // reads headroom CACHE-ONLY (no network usage fetch on the 429
+                // path), honors the per-provider switch cooldown, and returns
+                // None when there is no eligible sibling - in which case we fall
+                // through to the ordinary transient-retry handling below.
+                if is_oauth
+                    && is_rate_limit_error(&error_str)
+                    && attempt + 1 < MAX_RETRIES
+                    && let Some(new_label) = jcode_base::provider::reactive_switch_on_rate_limit(
+                        jcode_provider_core::ActiveProvider::Claude,
+                    )
+                {
+                    match reload_credentials_for_reactive_switch(Arc::clone(&credentials), &new_label)
+                        .await
+                    {
+                        Ok(new_token) => {
+                            jcode_base::logging::info(&format!(
+                                "Rate limited; switched to account '{}' and retrying immediately (same model)",
+                                new_label
+                            ));
+                            let _ = tx
+                                .send(Ok(StreamEvent::StatusDetail {
+                                    detail: format!(
+                                        "Rate limited; switched to account '{}' and retrying",
+                                        new_label
+                                    ),
+                                }))
+                                .await;
+                            token = new_token;
+                            // Retry now without the backoff delay: a fresh
+                            // account should not inherit the capped account's
+                            // retry-after.
+                            next_retry_delay = Some(std::time::Duration::from_millis(0));
+                            last_error = Some(e);
+                            continue;
+                        }
+                        Err(switch_err) => {
+                            // Could not load creds for the new account; fall
+                            // through to the ordinary transient backoff retry on
+                            // the current account (only if the error is itself
+                            // retryable).
+                            jcode_base::logging::warn(&format!(
+                                "Reactive account switch to '{}' failed to load credentials ({}); falling back to backoff retry",
+                                new_label, switch_err
+                            ));
+                        }
+                    }
+                }
+
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     if saw_output {
@@ -1964,6 +2026,47 @@ async fn force_refresh_oauth_token(
     }
 
     Ok(refreshed.access_token)
+}
+
+/// Load the sibling account's stored credentials into the runtime's credential
+/// cache after a reactive rate-limit account switch, so the retry uses the new
+/// account. Refreshes the token first if it is expired or near expiry. Returns
+/// the usable access token. Never rewrites the stored auth file; it only updates
+/// the in-process cache.
+async fn reload_credentials_for_reactive_switch(
+    credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    new_label: &str,
+) -> Result<String> {
+    let loaded = auth::claude::load_credentials_for_account(new_label).with_context(|| {
+        format!("Failed to load Claude credentials for switched account '{new_label}'")
+    })?;
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let needs_refresh = loaded.expires_at < now + 300_000 && !loaded.refresh_token.is_empty();
+
+    let (access_token, refresh_token, expires_at) = if needs_refresh {
+        let refreshed = oauth::refresh_claude_tokens_for_account(&loaded.refresh_token, new_label)
+            .await
+            .with_context(|| format!("OAuth refresh failed for switched account '{new_label}'"))?;
+        (
+            refreshed.access_token,
+            refreshed.refresh_token,
+            refreshed.expires_at,
+        )
+    } else {
+        (loaded.access_token, loaded.refresh_token, loaded.expires_at)
+    };
+
+    {
+        let mut cached = credentials.write().await;
+        *cached = Some(CachedCredentials {
+            access_token: access_token.clone(),
+            refresh_token,
+            expires_at,
+        });
+    }
+
+    Ok(access_token)
 }
 
 /// Stream the response from Anthropic API
@@ -2165,6 +2268,32 @@ async fn stream_response(
     }
 
     Ok(())
+}
+
+/// Whether an error string is an Anthropic account-capacity rate limit that
+/// should trigger a reactive account switch, as opposed to a generic transient
+/// error (5xx / overload / transport) where switching accounts would not help.
+///
+/// The 5-hour OAuth cap is an HTTP 429 `rate_limit_error`, but its body text
+/// varies and frequently reads "usage limit reached" / "quota exceeded" rather
+/// than the literal "rate limit" (see anthropics/claude-code#22876). On the
+/// mid-stream SSE `error` path the message arrives WITHOUT the "429" status
+/// prefix, so the gate must recognize the usage-window spellings the rest of the
+/// codebase already knows. Keep this vocabulary in sync with
+/// `is_fable_scoped_limit_error` and the TUI auto-poke matcher (see AGENTS.md).
+///
+/// Deliberately NARROWER than `is_retryable_error`: a generic `overloaded` /
+/// 5xx / transport blip must stay a same-account backoff, never a switch.
+fn is_rate_limit_error(error_str: &str) -> bool {
+    let lower = error_str.to_ascii_lowercase();
+    lower.contains("429 too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        // 5-hour / usage-window cap spellings (same 429, body text varies).
+        || lower.contains("usage_limit")
+        || lower.contains("usage limit")
+        || lower.contains("quota exceeded")
+        || lower.contains("quota_exceeded")
 }
 
 /// Check if an error is transient and should be retried

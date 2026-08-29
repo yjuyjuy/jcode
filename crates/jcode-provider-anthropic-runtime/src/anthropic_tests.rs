@@ -1998,6 +1998,80 @@ fn detects_live_fable_scoped_limit_errors_without_misrouting_other_limits() {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// Reactive account switch gate: `is_rate_limit_error`
+//
+// The 5-hour OAuth cap surfaces as an HTTP 429 `rate_limit_error`, but the body
+// text varies and frequently reads "usage limit reached" (see
+// anthropics/claude-code#22876, OmniRoute#2321). On the mid-stream SSE `error`
+// path the message arrives WITHOUT the "429" status prefix, so the gate must
+// recognize the usage-window spellings the rest of the codebase already knows.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rate_limit_gate_matches_classic_429_spellings() {
+    // The HTTP path always prefixes the status; the body may carry the type.
+    assert!(is_rate_limit_error(
+        "anthropic api error (429 too many requests): rate_limit_error"
+    ));
+    assert!(is_rate_limit_error(
+        r#"anthropic api error (429 too many requests): {"type":"rate_limit_error","message":"this request would exceed your account's rate limit"}"#
+    ));
+    assert!(is_rate_limit_error("rate_limit"));
+    // Case-insensitive: the SSE path may hand us un-normalized text.
+    assert!(is_rate_limit_error("HTTP 429: Rate_Limit_Error"));
+}
+
+#[test]
+fn rate_limit_gate_matches_5h_usage_cap_spellings() {
+    // The 5-hour cap is the SAME 429, but the body text often reads as a usage
+    // limit rather than the literal "rate limit". Each of these must trigger the
+    // reactive switch, including on the SSE error path with no "429" prefix.
+    assert!(
+        is_rate_limit_error("claude usage limit reached, please try again after 3am"),
+        "5h cap 'usage limit reached' must trigger the switch"
+    );
+    assert!(
+        is_rate_limit_error(r#"{"type":"rate_limit_error","message":"usage limit reached"}"#),
+        "SSE-style body without a 429 prefix must still match"
+    );
+    assert!(
+        is_rate_limit_error("usage_limit_reached"),
+        "snake_case usage_limit spelling must match"
+    );
+    assert!(is_rate_limit_error("quota exceeded"));
+    assert!(is_rate_limit_error("quota_exceeded"));
+    // The uppercase form the TUI matcher also handles.
+    assert!(is_rate_limit_error("Usage Limit Has Been Reached"));
+}
+
+#[test]
+fn rate_limit_gate_does_not_match_generic_transient_errors() {
+    // A 5xx / transport blip / overload is NOT account-specific: switching
+    // accounts would not help and would burn the cooldown. These must NOT match
+    // the switch gate even though `is_retryable_error` treats them as retryable.
+    assert!(!is_rate_limit_error("429 overloaded_error: service temporarily overloaded"));
+    assert!(!is_rate_limit_error("overloaded"));
+    assert!(!is_rate_limit_error("503 service unavailable"));
+    assert!(!is_rate_limit_error("500 internal server error"));
+    assert!(!is_rate_limit_error("stream error: connection reset"));
+    // `overloaded` is retryable but must stay a same-account backoff, not a switch.
+    assert!(is_retryable_error("overloaded"));
+    assert!(!is_rate_limit_error("overloaded"));
+}
+
+#[test]
+fn seven_day_weekly_cap_still_recognized_as_a_limit() {
+    // A 7-day / weekly cap must keep routing through its existing handling: it
+    // is still a limit for the gate's purposes (so a headroom sibling can serve
+    // it), and the Fable-scoped matcher still recognizes the model-scoped form.
+    assert!(is_rate_limit_error("usage limit reached for the 7-day model window"));
+    assert!(is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "usage limit reached for the 7-day model window",
+    ));
+}
+
 #[test]
 fn ping_keepalive_emits_streaming_phase_event() {
     // Issue #451: during silent reasoning phases, `ping` events can be the

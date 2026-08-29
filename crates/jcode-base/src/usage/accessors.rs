@@ -284,6 +284,86 @@ fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {
     })
 }
 
+/// Cache-ONLY Anthropic account usage probe for the reactive rate-limit switch.
+///
+/// Unlike [`anthropic_account_usage_probe_sync`], this NEVER issues a network
+/// usage fetch: a sibling whose usage cache is cold is reported with unknown
+/// headroom (`five_hour_ratio`/`seven_day_ratio` = `None`, `exhausted = false`)
+/// instead of being fetched. This is the hardening the reactive switch relies on
+/// so a 429 can never trigger a burst of usage-endpoint calls. The active
+/// account still uses its live in-memory snapshot when one exists.
+pub fn anthropic_account_usage_probe_cache_only() -> Option<AccountUsageProbe> {
+    let accounts = auth::claude::list_accounts().ok()?;
+    if accounts.is_empty() {
+        return None;
+    }
+
+    let current_label = auth::claude::active_account_label()
+        .or_else(|| accounts.first().map(|account| account.label.clone()))?;
+    let active_cached = get_sync();
+
+    let mut snapshots = Vec::with_capacity(accounts.len());
+    for account in &accounts {
+        // Active account: prefer its live snapshot if one has been fetched.
+        if account.label == current_label && active_cached.fetched_at.is_some() {
+            snapshots.push(anthropic_snapshot_from_usage(
+                account.label.clone(),
+                account.email.clone(),
+                &active_cached,
+            ));
+            continue;
+        }
+
+        // Any other account (or an active account with no live snapshot): read
+        // the usage cache ONLY. A cache miss yields unknown headroom, which the
+        // switch scores as 0.0 - i.e. still eligible as a target, because any
+        // account is better than the one we just got rate-limited on. Sibling
+        // usage is cached keyed by token (see `fetch_usage_for_account_sync`),
+        // so read with the same token-based key rather than a label key.
+        let cache_key = anthropic_usage_cache_key(&account.access, None);
+        match cached_anthropic_usage(&cache_key) {
+            Some(usage) => snapshots.push(anthropic_snapshot_from_usage(
+                account.label.clone(),
+                account.email.clone(),
+                &usage,
+            )),
+            None => snapshots.push(AccountUsageSnapshot {
+                label: account.label.clone(),
+                email: account.email.clone(),
+                exhausted: false,
+                primary_label: None,
+                five_hour_ratio: None,
+                secondary_label: None,
+                seven_day_ratio: None,
+                resets_at: None,
+                error: None,
+            }),
+        }
+    }
+
+    Some(AccountUsageProbe {
+        provider: MultiAccountProviderKind::Anthropic,
+        current_label,
+        accounts: snapshots,
+    })
+}
+
+/// Test-only seam: seed the Anthropic usage cache for an account identified by
+/// its access token, so integration tests can exercise the cache-only probe and
+/// the reactive account switch without any network fetch. Keyed exactly like the
+/// production sibling read (`anthropic_usage_cache_key(token, None)`).
+#[cfg(test)]
+pub fn seed_anthropic_usage_cache_for_token(access_token: &str, five_hour: f32, seven_day: f32) {
+    let cache_key = anthropic_usage_cache_key(access_token, None);
+    let data = UsageData {
+        five_hour,
+        seven_day,
+        fetched_at: Some(Instant::now()),
+        ..UsageData::default()
+    };
+    store_anthropic_usage(cache_key, data);
+}
+
 fn openai_account_usage_probe_sync() -> Option<AccountUsageProbe> {
     let accounts = auth::codex::list_accounts().ok()?;
     if accounts.is_empty() {
