@@ -352,6 +352,14 @@ struct PendingFallbackOffer {
     /// cleanup clears it, so accepting the offer can resend it on the new
     /// route. Local sessions resend via `pending_turn` instead.
     remote_resend: Option<FallbackResendPayload>,
+    /// When set, the offer auto-applies at this deadline instead of waiting
+    /// forever for a keypress. Armed for supervised/remote sessions (and any
+    /// session whose `cross_provider_failover` config opts into countdown), so
+    /// an unattended worker recovers on its own. `None` keeps the historical
+    /// keypress-only behavior for a genuinely interactive local session under
+    /// manual failover config. A watching human can still cancel the auto-take
+    /// with Esc (dropping back to keypress-only) or accept early with the key.
+    auto_take_deadline: Option<Instant>,
 }
 
 /// The failed remote turn's payload, held by a [`PendingFallbackOffer`] so a

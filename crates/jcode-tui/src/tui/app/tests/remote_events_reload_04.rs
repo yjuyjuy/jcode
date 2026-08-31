@@ -508,7 +508,9 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.contains("Fallback available")),
+            .any(|m| m.role == "system"
+                && (m.content.contains("Auto-switching")
+                    || m.content.contains("Fallback available"))),
         "offer message should be shown"
     );
 }

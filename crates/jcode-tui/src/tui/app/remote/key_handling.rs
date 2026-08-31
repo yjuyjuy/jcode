@@ -377,6 +377,23 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // A watching human on a remote/self-dev session can cancel a fallback-offer
+    // auto-take with Esc, reverting to keypress-only (the offer stays armed).
+    if code == KeyCode::Esc
+        && !app.is_processing
+        && app
+            .pending_fallback_offer
+            .as_ref()
+            .is_some_and(|offer| offer.auto_take_deadline.is_some())
+    {
+        if let Some(offer) = app.pending_fallback_offer.as_mut() {
+            offer.auto_take_deadline = None;
+        }
+        let key_label = crate::tui::keybind::fallback_switch_key_label();
+        app.set_status_notice(format!("Auto-switch canceled; press {} to switch", key_label));
+        return Ok(());
+    }
+
     // Accept an armed post-error fallback offer: stage the route switch and
     // resend so the remote dispatcher applies it (SetRoute + payload resend).
     // Checked before the merge offer to match the local key-handling order

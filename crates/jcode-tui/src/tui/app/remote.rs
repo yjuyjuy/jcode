@@ -170,6 +170,36 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
+    // Advance the post-error fallback-offer auto-take on remote sessions too.
+    // A chatgpt-web 429 (and any terminal turn error with a working alternative)
+    // arms a `PendingFallbackOffer`, which used to require a Ctrl+Y keypress no
+    // unattended remote worker can send. On deadline the offer applies itself,
+    // staging `pending_route_selection` + `pending_fallback_resend` exactly like
+    // the countdown above; drain the route selection here so the server performs
+    // the switch and the resend follows, mirroring the key-event drain path.
+    if app.maybe_progress_fallback_offer_auto_take() {
+        needs_redraw = true;
+        if let Some(selection) = app.pending_route_selection.take() {
+            app.pending_model_switch = None;
+            match remote.set_route_selection(selection).await {
+                Ok(_) => {
+                    app.remote_model_switch_in_flight = true;
+                    forward_pending_reasoning_effort(app, remote).await;
+                }
+                Err(error) => {
+                    app.pending_reasoning_effort = None;
+                    // The resend must not fire without its route switch.
+                    app.pending_fallback_resend = None;
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to request provider switch: {}",
+                        error
+                    )));
+                    app.set_status_notice("Provider switch failed");
+                }
+            }
+        }
+    }
+
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {
             match remote.resume_session(&request.target_session_id).await {

@@ -2953,6 +2953,28 @@ impl App {
             }
         }
 
+        // A watching human can cancel a fallback-offer auto-take with Esc,
+        // reverting to keypress-only (the offer itself stays armed so they can
+        // still accept it later with the switch key). This mirrors the Esc
+        // cancel for the cross-provider countdown above.
+        if code == KeyCode::Esc
+            && !self.is_processing
+            && self
+                .pending_fallback_offer
+                .as_ref()
+                .is_some_and(|offer| offer.auto_take_deadline.is_some())
+        {
+            if let Some(offer) = self.pending_fallback_offer.as_mut() {
+                offer.auto_take_deadline = None;
+            }
+            let key_label = crate::tui::keybind::fallback_switch_key_label();
+            self.set_status_notice(format!(
+                "Auto-switch canceled; press {} to switch",
+                key_label
+            ));
+            return Ok(());
+        }
+
         // Accept an armed post-error fallback offer: switch to the next best
         // model/auth-method and resend the failed turn.
         if self.pending_fallback_offer.is_some()
