@@ -69,45 +69,72 @@ impl Tool for McpTool {
             .call_tool(&self.server_name, &self.tool_def.name, input)
             .await?;
 
-        // Convert MCP content blocks to output string
-        let mut output_parts = Vec::new();
-        for block in result.content {
-            match block {
-                ContentBlock::Text { text } => {
-                    output_parts.push(text);
-                }
-                ContentBlock::Image { data, mime_type } => {
-                    output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
-                }
-                ContentBlock::Resource { resource } => {
-                    if let Some(text) = resource.text {
-                        output_parts.push(text);
-                    } else if let Some(blob) = resource.blob {
-                        output_parts.push(format!(
-                            "[Resource: {} ({} bytes)]",
-                            resource.uri,
-                            blob.len()
-                        ));
-                    } else {
-                        output_parts.push(format!("[Resource: {}]", resource.uri));
-                    }
-                }
-            }
-        }
-
-        let output = output_parts.join("\n");
+        // Convert MCP content blocks into the output text plus any image blocks
+        // (routed into ToolOutput.images so the model actually sees the pixels).
+        let (output, images) = convert_content_blocks(result.content);
         let title = format!("mcp:{}:{}", self.server_name, self.tool_def.name);
 
         if result.is_error {
-            Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
+            let mut out = ToolOutput::new(format!("Error: {}", output)).with_title(title);
+            out.images = images;
+            Ok(out)
         } else {
-            Ok(ToolOutput::new(output).with_title(title))
+            let mut out = ToolOutput::new(output).with_title(title);
+            out.images = images;
+            Ok(out)
         }
     }
 }
 
 pub fn dispatch_name(server_name: &str, tool_name: &str) -> String {
     format!("mcp__{}__{}", server_name, tool_name).replace('-', "_")
+}
+
+/// Convert MCP content blocks into (joined output text, image blocks).
+///
+/// Image blocks are routed into the returned `ToolImage` vec (which the caller
+/// puts on `ToolOutput.images`, the model-visible image channel that native
+/// tools populate via `with_image`) instead of being stringified away. A short
+/// text breadcrumb is still emitted for every image so text-only providers, and
+/// logs, retain a trace of what was attached.
+fn convert_content_blocks(
+    content: Vec<ContentBlock>,
+) -> (String, Vec<jcode_tool_types::ToolImage>) {
+    let mut output_parts = Vec::new();
+    let mut images: Vec<jcode_tool_types::ToolImage> = Vec::new();
+    for block in content {
+        match block {
+            ContentBlock::Text { text } => {
+                output_parts.push(text);
+            }
+            ContentBlock::Image { data, mime_type } => {
+                output_parts.push(format!(
+                    "[Image: {} ({} bytes) - attached to model]",
+                    mime_type,
+                    data.len()
+                ));
+                images.push(jcode_tool_types::ToolImage {
+                    media_type: mime_type,
+                    data,
+                    label: None,
+                });
+            }
+            ContentBlock::Resource { resource } => {
+                if let Some(text) = resource.text {
+                    output_parts.push(text);
+                } else if let Some(blob) = resource.blob {
+                    output_parts.push(format!(
+                        "[Resource: {} ({} bytes)]",
+                        resource.uri,
+                        blob.len()
+                    ));
+                } else {
+                    output_parts.push(format!("[Resource: {}]", resource.uri));
+                }
+            }
+        }
+    }
+    (output_parts.join("\n"), images)
 }
 
 /// Create tools from an MCP manager
@@ -150,7 +177,8 @@ pub fn create_mcp_tools_from_cached(
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_name;
+    use super::{convert_content_blocks, dispatch_name};
+    use super::super::protocol::ContentBlock;
 
     #[test]
     fn hyphenated_mcp_names_are_safe_for_the_standard_dispatcher() {
@@ -162,5 +190,43 @@ mod tests {
             dispatch_name("hyphenated-server", "query-docs"),
             "mcp__hyphenated_server__query_docs"
         );
+    }
+
+    #[test]
+    fn image_blocks_are_routed_into_the_image_channel_not_stringified_away() {
+        // An MCP tool result carrying a text block and an image block (the exact
+        // shape the Mattermost MCP server returns for a screenshot attachment).
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "here is the screenshot".to_string(),
+            },
+            ContentBlock::Image {
+                data: "aGVsbG8=".to_string(), // base64 for "hello"
+                mime_type: "image/png".to_string(),
+            },
+        ];
+
+        let (output, images) = convert_content_blocks(blocks);
+
+        // The pixels reach the model: exactly one image block on the vec, with
+        // the right media type and the base64 payload preserved verbatim.
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].media_type, "image/png");
+        assert_eq!(images[0].data, "aGVsbG8=");
+        // The old behavior stringified the image into the text and dropped the
+        // pixels; assert the text is NOT the sole carrier - the breadcrumb marks
+        // it as attached, and the real text block still comes through.
+        assert!(output.contains("here is the screenshot"));
+        assert!(output.contains("attached to model"));
+    }
+
+    #[test]
+    fn non_image_results_carry_no_images() {
+        let blocks = vec![ContentBlock::Text {
+            text: "plain text only".to_string(),
+        }];
+        let (output, images) = convert_content_blocks(blocks);
+        assert!(images.is_empty());
+        assert_eq!(output, "plain text only");
     }
 }
