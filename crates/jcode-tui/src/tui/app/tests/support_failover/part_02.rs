@@ -662,10 +662,13 @@ fn test_turn_error_offers_same_model_oauth_fallback() {
             app.pending_fallback_offer.is_some(),
             "an auth error with a working OAuth route should arm a fallback offer"
         );
+        // Under the default `countdown` failover config the offer auto-takes
+        // (matching the account-plane countdown card), so the message advertises
+        // the auto-switch; a manual-config session would say "Fallback available".
         let offer_msg = app
             .display_messages
             .iter()
-            .find(|m| m.content.contains("Fallback available"))
+            .find(|m| m.content.contains("Auto-switching") || m.content.contains("Fallback available"))
             .expect("offer message should be shown");
         assert!(offer_msg.content.contains("oauth") || offer_msg.content.contains("OAuth"));
     });
@@ -830,3 +833,147 @@ fn test_local_manual_failover_does_not_arm_countdown() {
         );
     });
 }
+
+/// Build a REMOTE session on the `chatgpt-web` route with an Anthropic OAuth
+/// route available as a cross-provider fallback target. This reproduces the
+/// live defect shape: a chatgpt-web 429 that offered "press Ctrl+Y to switch to
+/// claude-opus via oauth", which no unattended remote worker could answer.
+fn create_remote_chatgpt_web_fallback_test_app() -> App {
+    let mut app = create_switchable_test_app("openai").0;
+    app.is_remote = true;
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-5".to_string());
+    // The active (failing) route is chatgpt-web.
+    app.session.route_api_method = Some("chatgpt-web".to_string());
+    app.remote_model_options = vec![
+        crate::provider::ModelRoute {
+            model: "gpt-5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "chatgpt-web".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "claude-opus-4-8".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "claude-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+    ];
+    // A pending turn payload so the offer can stage a resend for the server.
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "do the thing".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app
+}
+
+/// Regression: a chatgpt-web 429 on a REMOTE/supervised session under the
+/// default `countdown` failover config must arm an AUTO-TAKE deadline on the
+/// fallback offer (not park at a keypress-only prompt), and when the deadline
+/// passes the offer must apply itself - staging the cross-provider route switch
+/// to the Anthropic OAuth route and a resend payload for the server dispatcher,
+/// with no manual keypress.
+#[test]
+fn test_remote_chatgpt_web_429_fallback_auto_takes_cross_provider() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let mut app = create_remote_chatgpt_web_fallback_test_app();
+
+        // The chatgpt-web 429 surfaces as a terminal turn error that arms the
+        // one-keypress fallback offer (the shape that used to require Ctrl+Y).
+        let armed = app.offer_fallback_after_error(
+            "OpenAI request failed (429 Too Many Requests): rate limit exceeded on chatgpt-web",
+        );
+        assert!(armed, "a chatgpt-web 429 with a working route must arm a fallback offer");
+
+        let offer = app
+            .pending_fallback_offer
+            .as_ref()
+            .expect("offer must be armed");
+        assert!(
+            offer.auto_take_deadline.is_some(),
+            "a supervised/remote session under countdown config must arm an auto-take deadline, \
+             not park at a keypress-only prompt"
+        );
+        assert_eq!(
+            offer.selection.model, "claude-opus-4-8",
+            "the fallback must target the Anthropic OAuth route"
+        );
+        assert_eq!(offer.selection.api_method, "claude-oauth");
+        // The displayed card must advertise the auto-switch, not a bare Ctrl+Y.
+        assert!(
+            app.display_messages
+                .iter()
+                .any(|m| m.content.contains("Auto-switching")),
+            "the card should advertise the auto-switch countdown"
+        );
+
+        // Force the deadline to elapse and let the tick progress the auto-take.
+        if let Some(offer) = app.pending_fallback_offer.as_mut() {
+            offer.auto_take_deadline = Some(Instant::now() - Duration::from_secs(1));
+        }
+        let progressed = app.maybe_progress_fallback_offer_auto_take();
+        assert!(progressed, "an elapsed auto-take must progress and fire");
+        assert!(
+            app.pending_fallback_offer.is_none(),
+            "firing the auto-take must consume the offer"
+        );
+
+        // Remote sessions carry out the switch through the server: the route
+        // selection and the resend payload must be staged for the dispatcher,
+        // exactly as if the user had pressed the accept key.
+        let selection = app
+            .pending_route_selection
+            .as_ref()
+            .expect("the auto-take must stage a cross-provider route selection");
+        assert_eq!(selection.model, "claude-opus-4-8");
+        assert_eq!(selection.api_method, "claude-oauth");
+        assert!(
+            app.pending_fallback_resend.is_some(),
+            "the failed turn's payload must be staged for resend after the switch"
+        );
+        // Remote sessions never resend via the local pending_turn path.
+        assert!(!app.pending_turn);
+    });
+}
+
+/// A genuinely interactive LOCAL session under `manual` failover config keeps
+/// the historical keypress-only behavior: the fallback offer arms with NO
+/// auto-take deadline, so nothing switches without a human keypress.
+#[test]
+fn test_local_manual_fallback_offer_stays_keypress_only() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let (mut app, _applied) = create_dual_method_test_app();
+
+        let armed = app.offer_fallback_after_error(
+            "Anthropic API error (401 Unauthorized): invalid x-api-key",
+        );
+        assert!(armed, "a working OAuth route must still arm a manual offer");
+        let offer = app
+            .pending_fallback_offer
+            .as_ref()
+            .expect("offer must be armed");
+        assert!(
+            offer.auto_take_deadline.is_none(),
+            "local + manual config must stay keypress-only (no auto-take)"
+        );
+
+        // An auto-take tick must be a no-op when no deadline is armed.
+        assert!(!app.maybe_progress_fallback_offer_auto_take());
+        assert!(
+            app.pending_fallback_offer.is_some(),
+            "the offer must remain armed for a manual keypress"
+        );
+    });
+}
+

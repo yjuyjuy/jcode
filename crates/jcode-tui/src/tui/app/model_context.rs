@@ -378,6 +378,69 @@ impl App {
         format!("{} via {} ({})", route.model, method, route.provider)
     }
 
+    /// Decide whether an armed [`super::PendingFallbackOffer`] should auto-apply
+    /// after a grace window instead of parking forever on a keypress, and how
+    /// long that window is. Returns `None` to keep the historical keypress-only
+    /// behavior (a genuinely interactive local session under manual failover).
+    ///
+    /// This mirrors the cross-provider countdown decision matrix in
+    /// [`Self::handle_provider_failover_prompt`], so the two recovery paths stay
+    /// consistent rather than diverging:
+    /// - Countdown config (the default): auto-take after a short 3s grace for
+    ///   BOTH local and remote sessions.
+    /// - Manual config + remote/supervised session: no human can press the key,
+    ///   so auto-take after a longer 30s grace (a watching human still has time
+    ///   to cancel with Esc, but an unattended fleet worker recovers itself).
+    /// - Manual config + local interactive session: `None`, keypress-only.
+    fn fallback_offer_auto_take_grace(&self) -> Option<Duration> {
+        match crate::config::Config::load().provider.cross_provider_failover {
+            crate::config::CrossProviderFailoverMode::Countdown => Some(Duration::from_secs(3)),
+            crate::config::CrossProviderFailoverMode::Manual if self.is_remote => {
+                Some(Duration::from_secs(30))
+            }
+            crate::config::CrossProviderFailoverMode::Manual => None,
+        }
+    }
+
+    /// Advance the auto-take countdown for an armed fallback offer. When the
+    /// deadline passes the offer applies itself (switch + resend) exactly as if
+    /// the user had pressed the accept key, so a supervised/remote session does
+    /// not park at a Ctrl+Y prompt no unattended worker can answer. Returns true
+    /// when the UI should redraw (an active countdown ticked or fired).
+    ///
+    /// Runs from both the local and remote tick loops, next to
+    /// [`Self::maybe_progress_provider_failover_countdown`]. Offers with no
+    /// `auto_take_deadline` (interactive local + manual config) are left alone.
+    pub(super) fn maybe_progress_fallback_offer_auto_take(&mut self) -> bool {
+        let Some(deadline) = self
+            .pending_fallback_offer
+            .as_ref()
+            .and_then(|offer| offer.auto_take_deadline)
+        else {
+            return false;
+        };
+        if self.is_processing {
+            return false;
+        }
+        let now = Instant::now();
+        if now < deadline {
+            let remaining = deadline.saturating_duration_since(now).as_secs() + 1;
+            if let Some(model) = self
+                .pending_fallback_offer
+                .as_ref()
+                .map(|offer| offer.selection.model.clone())
+            {
+                self.set_status_notice(format!(
+                    "Auto-switch → {} in {}s (Esc to cancel)",
+                    model, remaining
+                ));
+            }
+            return true;
+        }
+        self.apply_pending_fallback_offer();
+        true
+    }
+
     /// After a provider turn error, compute the next best available route and, if
     /// one exists, arm an interactive offer the user can accept with a keypress to
     /// switch and resend. Returns true when an offer was armed.
@@ -461,16 +524,39 @@ impl App {
         // so only name the failed route here instead of echoing the error text
         // a second time.
         let key_label = crate::tui::keybind::fallback_switch_key_label();
-        self.push_display_message(DisplayMessage::system(format!(
-            "↪ {} failed. Fallback available: press {} to switch to {} and resend.",
-            from_label, key_label, target_label,
-        )));
-        self.set_status_notice(format!("Press {} to switch to {}", key_label, route.model));
+        // Supervised/remote sessions (and any session opted into countdown
+        // failover) auto-take the offer after a grace window so an unattended
+        // worker is not stranded at a keypress it cannot answer - the exact
+        // shape that wedged a chatgpt-web 429 remote worker. A genuinely
+        // interactive local session under manual config keeps keypress-only.
+        let auto_take_grace = self.fallback_offer_auto_take_grace();
+        let auto_take_deadline = auto_take_grace.map(|grace| Instant::now() + grace);
+        if let Some(grace) = auto_take_grace {
+            self.push_display_message(DisplayMessage::system(format!(
+                "↪ {} failed. Auto-switching to {} in {}s and resending (press {} to switch now, Esc to cancel).",
+                from_label,
+                target_label,
+                grace.as_secs(),
+                key_label,
+            )));
+            self.set_status_notice(format!(
+                "Auto-switch → {} in {}s (Esc to cancel)",
+                route.model,
+                grace.as_secs()
+            ));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "↪ {} failed. Fallback available: press {} to switch to {} and resend.",
+                from_label, key_label, target_label,
+            )));
+            self.set_status_notice(format!("Press {} to switch to {}", key_label, route.model));
+        }
         self.pending_fallback_offer = Some(super::PendingFallbackOffer {
             selection: crate::provider::RouteSelection::from_model_route(&route),
             target_label,
             from_label,
             remote_resend,
+            auto_take_deadline,
         });
         true
     }
@@ -576,10 +662,13 @@ impl App {
             target_label,
             from_label,
             remote_resend,
+            // Guardrail reroute stays keypress-only: it is a model-policy
+            // escalation to a stronger model, not a provider-availability
+            // failover, so it should not silently auto-switch on a timer.
+            auto_take_deadline: None,
         });
         true
     }
-
     /// Apply the armed fallback offer: switch to the alternative route and resend
     /// the failed turn. Returns true when an offer was present and consumed.
     ///

@@ -71,6 +71,17 @@ switch to a sibling account with headroom (cache-only probe, per-provider
 cooldown) and retry the same model. This coexists with the between-turns
 `try_same_provider_account_failover` and the cross-provider countdown failover.
 
+Two DIFFERENT TUI surfaces recover from a cross-provider outage; do not conflate
+them (`crates/jcode-tui/src/tui/app/model_context.rs`). `PendingProviderFailover`
+is the server-decided countdown, armed by `handle_provider_failover_prompt` only
+when `parse_failover_prompt_message` matches a `[jcode-provider-failover]` marker.
+`PendingFallbackOffer` is the reactive path for a plain terminal turn error (e.g.
+a chatgpt-web 429), armed by `offer_fallback_after_error`. Both honor
+`cross_provider_failover` and both now auto-take on a deadline for
+countdown/remote sessions (`maybe_progress_*` run from `local.rs` + `remote.rs`;
+remote drains `pending_route_selection` after firing); a plain 429 flows through
+the offer path, not the marker path.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
