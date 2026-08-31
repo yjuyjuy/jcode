@@ -3,7 +3,8 @@
 use super::socket::sibling_socket_path;
 #[cfg(unix)]
 use super::socket::{
-    daemon_lock_path, server_start_matches_existing_server, try_acquire_daemon_lock,
+    daemon_lock_path, detach_daemon_stdio, server_start_matches_existing_server,
+    try_acquire_daemon_lock,
 };
 use super::{
     ReloadPhase, ReloadState, ReloadWaitStatus, await_reload_handoff, cleanup_socket_pair,
@@ -536,4 +537,121 @@ async fn await_reload_handoff_returns_failed_after_marker_transition() {
     } else {
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
+}
+
+/// Regression: `jcode server start` daemon must survive its launching shell
+/// exiting.
+///
+/// Root cause: the spawned daemon inherits `stderr` as a pipe whose only reader
+/// is a drain thread inside the spawning client (see `spawn_server_notify`).
+/// Once that client exits, the pipe has no readers and the next `eprintln!`
+/// anywhere in the daemon writes to a broken pipe. Because SIGPIPE is ignored,
+/// the Rust runtime turns that failed write into a panic ("failed printing to
+/// stderr"), which tears the daemon down with no graceful shutdown log -- the
+/// observed symptom. `detach_daemon_stdio` (called from `signal_ready_fd` once
+/// the daemon is up and the client is free to leave) points stdout/stderr at
+/// /dev/null so that write can never fail.
+///
+/// A full `server start` integration test would need a real installed binary
+/// and a background daemon lifecycle, which is impractical inside a unit suite.
+/// This instead reproduces the daemon's exact post-exit fd state -- fd 2 is a
+/// pipe whose reader is gone -- inside a forked child (so the shared test
+/// process's own stdio is never rewired), and asserts the mechanism at the
+/// syscall level with deterministic raw writes: a write to that broken pipe
+/// fails with EPIPE (the error the Rust runtime escalates to a fatal print
+/// panic), and after `detach_daemon_stdio` the same write succeeds because fd 2
+/// now points at /dev/null. The child reports both observations through a single
+/// exit code, so there is no reliance on panic-after-fork behavior.
+///
+/// Coverage boundary: it exercises the stdio detach itself and its effect on
+/// fd 1/2, not the surrounding `spawn_server_notify`/registry plumbing.
+#[cfg(unix)]
+#[test]
+fn daemon_survives_parent_exit_after_stdio_detach() {
+    // Exit codes the child uses to report what it observed.
+    const OK: i32 = 0; // EPIPE before, write ok after (the fix works)
+    const NO_EPIPE_BEFORE: i32 = 10; // broken pipe did not EPIPE (bad setup)
+    const STILL_FAILS_AFTER: i32 = 11; // detach did not repair the write
+
+    fn raw_write(fd: i32, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+        if n < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
+
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+    let (pipe_read, pipe_write) = (fds[0], fds[1]);
+
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork()");
+
+    if pid == 0 {
+        // Child = the "daemon". SIGPIPE must be ignored so a broken-pipe write
+        // returns EPIPE instead of killing us by signal -- this mirrors the
+        // Rust runtime default under which the regression surfaces as a print
+        // panic rather than a raw signal.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+            // Point stderr at the pipe's write end, then drop both original
+            // pipe fds. With the read end closed, fd 2 is now a pipe with no
+            // readers: exactly the daemon's state once its launching client
+            // (the sole reader of the inherited stderr pipe) has exited.
+            libc::dup2(pipe_write, libc::STDERR_FILENO);
+            libc::close(pipe_write);
+            libc::close(pipe_read);
+        }
+
+        // Without the fix, this write hits the reader-less pipe and fails with
+        // EPIPE -- the exact error the daemon's `eprintln!` turns fatal.
+        let before = raw_write(libc::STDERR_FILENO, b"stray daemon log\n");
+        let before_epipe = matches!(
+            before.as_ref().map_err(|e| e.raw_os_error()),
+            Err(Some(code)) if code == libc::EPIPE
+        );
+        if !before_epipe {
+            unsafe { libc::_exit(NO_EPIPE_BEFORE) };
+        }
+
+        // Apply the fix: fd 1 and fd 2 now point at /dev/null.
+        detach_daemon_stdio();
+
+        // The same write must now succeed -- the daemon can log forever without
+        // ever EPIPE-ing once its launcher is gone.
+        let after = raw_write(libc::STDERR_FILENO, b"stray daemon log\n");
+        unsafe { libc::_exit(if after.is_ok() { OK } else { STILL_FAILS_AFTER }) };
+    }
+
+    // Parent: drop both pipe ends and reap the child.
+    unsafe {
+        libc::close(pipe_write);
+        libc::close(pipe_read);
+    }
+    let mut status = 0i32;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, 0) },
+        pid,
+        "waitpid()"
+    );
+
+    assert!(
+        libc::WIFEXITED(status),
+        "child should exit normally, not die by signal; raw status {status}"
+    );
+    let code = libc::WEXITSTATUS(status);
+    assert_ne!(
+        code, NO_EPIPE_BEFORE,
+        "precondition failed: a write to the reader-less stderr pipe did not EPIPE"
+    );
+    assert_ne!(
+        code, STILL_FAILS_AFTER,
+        "after detach, stderr writes must succeed (fd -> /dev/null) but still failed"
+    );
+    assert_eq!(
+        code, OK,
+        "daemon with stdio detached must survive the post-parent-exit stderr write"
+    );
 }

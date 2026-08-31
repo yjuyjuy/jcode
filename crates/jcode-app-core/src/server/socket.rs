@@ -437,6 +437,25 @@ pub(super) async fn handle_server_start_exit(
 /// Called after startup plumbing is ready so the parent process knows the
 /// server can accept and service client requests. The env var is cleared so child
 /// processes (e.g. tool subprocesses) don't inherit a stale fd.
+///
+/// Signalling ready is also the point at which the spawning client is free to
+/// exit. That client is the only reader of the daemon's inherited stderr pipe
+/// (it runs a background drain thread; see `spawn_server_notify`). Once it
+/// exits, the pipe has no readers, and the very next `eprintln!`/`println!`
+/// anywhere in the daemon writes to a broken pipe -- which the Rust runtime
+/// turns into a panic ("failed printing to stdout/stderr"), since SIGPIPE is
+/// ignored by default. That panic tears the daemon down with no graceful
+/// shutdown log line, which is exactly the `jcode server start` regression:
+/// the daemon binds the socket, prints "Server listening", then dies the
+/// moment the launching shell exits and a stray stderr write lands.
+///
+/// So the final step of daemonization is to sever those inherited stdio pipes:
+/// redirect stdout and stderr to /dev/null now that we no longer need them to
+/// report startup errors to the parent. The daemon logs to the file logger, not
+/// stderr, so nothing is lost. The reload re-exec path detaches stdio the same
+/// way in `prepare_server_exec`. Presence of `JCODE_READY_FD` is the definitive
+/// marker that this process was spawned as a background daemon by a client that
+/// will exit; in-process test servers never set it, so their stdio is untouched.
 pub(super) fn signal_ready_fd() {
     #[cfg(unix)]
     {
@@ -449,6 +468,31 @@ pub(super) fn signal_ready_fd() {
                 let _ = std::io::Write::write_all(&mut file, b"R");
                 // file is dropped here which closes the fd
             }
+            // We were spawned as a background daemon and just told the parent we
+            // are ready. Detach the inherited stdout/stderr now so a later write
+            // can never EPIPE-panic once that parent exits.
+            detach_daemon_stdio();
+        }
+    }
+}
+
+/// Redirect stdout and stderr to /dev/null so the daemon cannot be killed by a
+/// broken-pipe panic after its spawning client exits. See `signal_ready_fd`.
+#[cfg(unix)]
+pub(super) fn detach_daemon_stdio() {
+    // O_WRONLY so a write target; failing to open /dev/null should never abort
+    // startup, so this is best-effort.
+    let devnull = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
+    if devnull < 0 {
+        return;
+    }
+    // Point fd 1 (stdout) and fd 2 (stderr) at /dev/null. dup2 atomically
+    // closes the old descriptor (the inherited pipe) and installs the new one.
+    unsafe {
+        libc::dup2(devnull, libc::STDOUT_FILENO);
+        libc::dup2(devnull, libc::STDERR_FILENO);
+        if devnull != libc::STDOUT_FILENO && devnull != libc::STDERR_FILENO {
+            libc::close(devnull);
         }
     }
 }
