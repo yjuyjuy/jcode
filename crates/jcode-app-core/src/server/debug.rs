@@ -19,7 +19,7 @@ use super::debug_swarm_write::{DebugSwarmWriteContext, maybe_handle_swarm_write_
 use super::debug_testers::execute_tester_command;
 use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmEvent, SwarmMember, VersionedPlan,
-    debug_control_allowed, fanout_session_event,
+    debug_control_allowed, deliver_session_event_once, fanout_session_event,
 };
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
@@ -228,13 +228,27 @@ pub(super) async fn inject_transcript(
     )
     .await?;
 
-    let delivered = fanout_session_event(
-        swarm_members,
-        &session_id,
-        ServerEvent::Transcript { text, mode },
-    )
-    .await
-        > 0;
+    // `Send` submits a user turn into the SHARED session, so it must land on
+    // exactly one client; every other mode only edits each client's local input
+    // box and stays a fan-out. Reconnect churn accumulates stale-but-open
+    // senders, so fanning out `Send` duplicated the turn once per attachment.
+    let delivered = if matches!(mode, TranscriptMode::Send) {
+        deliver_session_event_once(
+            swarm_members,
+            &session_id,
+            ServerEvent::Transcript { text, mode },
+        )
+        .await
+            > 0
+    } else {
+        fanout_session_event(
+            swarm_members,
+            &session_id,
+            ServerEvent::Transcript { text, mode },
+        )
+        .await
+            > 0
+    };
 
     if !delivered {
         anyhow::bail!("Failed to deliver transcript to session '{}'", session_id);

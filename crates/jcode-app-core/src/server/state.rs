@@ -425,6 +425,44 @@ pub(super) async fn fanout_session_event(
     delivered
 }
 
+/// Deliver `event` to exactly ONE live attachment for the session.
+///
+/// Transcript `Send` mode submits a user turn into the shared session, so a
+/// full fan-out would submit N identical turns for N attached clients (and
+/// stale-but-open reconnect channels inflate N further). Every other event is
+/// per-client UI state and stays on `fanout_session_event`.
+pub(super) async fn deliver_session_event_once(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let target = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return 0;
+        };
+
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+
+        if member.event_txs.is_empty() {
+            member.event_tx.clone()
+        } else {
+            // Keep the cached primary when it is still a live attachment;
+            // otherwise rotate onto any live one so the single submission lands.
+            let primary_live = member
+                .event_txs
+                .values()
+                .any(|tx| tx.same_channel(&member.event_tx));
+            if !primary_live && let Some((_, tx)) = member.event_txs.iter().next() {
+                member.event_tx = tx.clone();
+            }
+            member.event_tx.clone()
+        }
+    };
+
+    if target.send(event).is_ok() { 1 } else { 0 }
+}
+
 pub(super) async fn fanout_live_client_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,

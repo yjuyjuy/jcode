@@ -98,10 +98,10 @@ mod tests {
 
 mod transcript_routing_tests {
     use super::super::{
-        ClientConnectionInfo, ClientDebugState, resolve_client_debug_sender,
+        ClientConnectionInfo, ClientDebugState, inject_transcript, resolve_client_debug_sender,
         resolve_transcript_target_session,
     };
-    use crate::protocol::ServerEvent;
+    use crate::protocol::{ServerEvent, TranscriptMode};
     use crate::server::SwarmMember;
     use std::collections::HashMap;
     #[cfg(target_os = "linux")]
@@ -548,6 +548,127 @@ mod transcript_routing_tests {
                 .expect("active client should resolve");
 
         assert_eq!(client_id, "debug-b");
+    }
+
+    fn transcript_test_member(
+        session_id: &str,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        event_txs: HashMap<String, mpsc::UnboundedSender<ServerEvent>>,
+    ) -> SwarmMember {
+        SwarmMember {
+            session_id: session_id.to_string(),
+            event_tx,
+            event_txs,
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: false,
+            status: "ready".to_string(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".to_string(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        }
+    }
+
+    fn drain_transcripts(receivers: &mut [&mut mpsc::UnboundedReceiver<ServerEvent>]) -> usize {
+        receivers
+            .iter_mut()
+            .map(|rx| {
+                let mut count = 0;
+                while let Ok(ServerEvent::Transcript { .. }) = rx.try_recv() {
+                    count += 1;
+                }
+                count
+            })
+            .sum()
+    }
+
+    // Regression: `--mode send` fanned out to every attachment, submitting the
+    // injected turn once per connection (15x in the 2026-09-01 incident). It
+    // must land on exactly one client regardless of attachment/churn count.
+    #[tokio::test]
+    async fn inject_transcript_send_reaches_exactly_one_of_many_connections() {
+        let session_id = "session_fanout".to_string();
+
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<ServerEvent>();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<ServerEvent>();
+        let (tx_c, mut rx_c) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut event_txs = HashMap::new();
+        event_txs.insert("conn-a".to_string(), tx_a.clone());
+        event_txs.insert("conn-b".to_string(), tx_b);
+        event_txs.insert("conn-c".to_string(), tx_c);
+
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            transcript_test_member(&session_id, tx_a, event_txs),
+        )])));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
+        let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+
+        let result = inject_transcript(
+            7,
+            "startup digest".to_string(),
+            TranscriptMode::Send,
+            Some(session_id.clone()),
+            &client_connections,
+            &client_debug_state,
+            &swarm_members,
+        )
+        .await
+        .expect("send injection should deliver");
+        assert!(matches!(result, ServerEvent::Done { id: 7 }));
+
+        let total = drain_transcripts(&mut [&mut rx_a, &mut rx_b, &mut rx_c]);
+        assert_eq!(
+            total, 1,
+            "mode=send must submit exactly one turn across all attachments"
+        );
+    }
+
+    // Contrast pin: non-send modes only edit each client's local input box, so
+    // they legitimately fan out to every attachment.
+    #[tokio::test]
+    async fn inject_transcript_replace_fans_out_to_every_connection() {
+        let session_id = "session_fanout_replace".to_string();
+
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<ServerEvent>();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut event_txs = HashMap::new();
+        event_txs.insert("conn-a".to_string(), tx_a.clone());
+        event_txs.insert("conn-b".to_string(), tx_b);
+
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            transcript_test_member(&session_id, tx_a, event_txs),
+        )])));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
+        let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+
+        inject_transcript(
+            8,
+            "typed text".to_string(),
+            TranscriptMode::Replace,
+            Some(session_id.clone()),
+            &client_connections,
+            &client_debug_state,
+            &swarm_members,
+        )
+        .await
+        .expect("replace injection should deliver");
+
+        let total = drain_transcripts(&mut [&mut rx_a, &mut rx_b]);
+        assert_eq!(total, 2, "non-send modes must reach every attachment");
     }
 }
 
