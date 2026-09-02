@@ -1922,50 +1922,6 @@ async fn run_stream_with_retries(
     }
 }
 
-async fn force_refresh_oauth_token(
-    credentials: Arc<RwLock<Option<CachedCredentials>>>,
-) -> Result<String> {
-    let refresh_from_cache = {
-        let cached = credentials.read().await;
-        cached
-            .as_ref()
-            .map(|c| c.refresh_token.clone())
-            .filter(|t| !t.is_empty())
-    };
-
-    let refresh_token = if let Some(token) = refresh_from_cache {
-        token
-    } else {
-        let loaded = auth::claude::load_credentials()
-            .context("Failed to load Claude credentials for forced refresh")?;
-        if loaded.refresh_token.is_empty() {
-            anyhow::bail!("No refresh token available in Claude credentials");
-        }
-        loaded.refresh_token
-    };
-
-    let active_label =
-        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
-    let refreshed =
-        match oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label).await {
-            Ok(refreshed) => refreshed,
-            Err(err) => {
-                anyhow::bail!("OAuth refresh endpoint rejected the refresh token: {err:#}");
-            }
-        };
-
-    {
-        let mut cached = credentials.write().await;
-        *cached = Some(CachedCredentials {
-            access_token: refreshed.access_token.clone(),
-            refresh_token: refreshed.refresh_token,
-            expires_at: refreshed.expires_at,
-        });
-    }
-
-    Ok(refreshed.access_token)
-}
-
 /// Stream the response from Anthropic API
 #[expect(
     clippy::too_many_arguments,
@@ -2655,6 +2611,9 @@ use sse_types::{
 };
 
 mod context_window;
+
+mod credential_refresh;
+use credential_refresh::force_refresh_oauth_token;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
