@@ -140,7 +140,7 @@ fn claude_refresh_invalid_scope_detection_matches_anthropic_error() {
     let err = anyhow::anyhow!(
         "Token refresh failed: {{\"error\": \"invalid_scope\", \"error_description\": \"The requested scope is invalid, unknown, or malformed.\"}}"
     );
-    assert!(crate::auth::claude_refresh::claude_refresh_error_is_invalid_scope(&err));
+    assert!(crate::auth::claude::claude_refresh::claude_refresh_error_is_invalid_scope(&err));
 }
 
 #[test]

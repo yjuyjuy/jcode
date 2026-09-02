@@ -96,4 +96,6 @@ async fn mock_token_server(
 // ========================
 
 mod basic;
+#[cfg(unix)]
+mod credential_file;
 mod flow;

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const CLAUDE_CODE_AUTH_SOURCE_ID: &str = "claude_code_credentials";
 pub const OPENCODE_AUTH_SOURCE_ID: &str = "opencode_anthropic_auth";
@@ -285,6 +285,43 @@ fn claude_code_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
+/// Claude Code's config home (`~/.claude`), the directory its credential file
+/// and refresh locks live in.
+pub fn claude_code_config_home() -> Result<PathBuf> {
+    let path = claude_code_path()?;
+    path.parent()
+        .map(Path::to_path_buf)
+        .context("Claude Code credential path has no parent directory")
+}
+
+/// Claude Code's credential file, when the user has trusted it as a source.
+/// `None` when untrusted, absent, or unparseable.
+pub fn load_trusted_claude_code_credentials() -> Option<ClaudeCredentials> {
+    let Ok(path) = claude_code_path() else {
+        return None;
+    };
+    // Hot path (per credential probe): use the process-cached config snapshot.
+    if !crate::config::Config::external_auth_source_allowed_for_path_cached(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &path,
+    ) {
+        return None;
+    }
+    let Ok(creds) = load_claude_code_credentials() else {
+        return None;
+    };
+    Some(creds)
+}
+
+/// Whether `refresh_token` is the one currently stored in the trusted Claude
+/// Code credential file. A refresh of that token must go through the file
+/// (under Claude Code's locks) rather than jcode's own `auth.json`.
+pub fn credential_file_owns_refresh_token(refresh_token: &str) -> bool {
+    !refresh_token.is_empty()
+        && load_trusted_claude_code_credentials()
+            .is_some_and(|creds| creds.refresh_token == refresh_token)
+}
+
 fn opencode_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".local/share/opencode/auth.json")
 }
@@ -539,20 +576,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
 
     let mut expired_candidates: Vec<(&str, ClaudeCredentials)> = Vec::new();
 
-    if claude_code_path()
-        .ok()
-        .map(|path| {
-            // Hot path: this runs per credential probe (route pricing, auth
-            // status, subscription checks). Use the process-cached config
-            // snapshot instead of re-parsing config.toml on every call.
-            crate::config::Config::external_auth_source_allowed_for_path_cached(
-                CLAUDE_CODE_AUTH_SOURCE_ID,
-                &path,
-            )
-        })
-        .unwrap_or(false)
-        && let Ok(creds) = load_claude_code_credentials()
-    {
+    if let Some(creds) = load_trusted_claude_code_credentials() {
         if creds.expires_at > now_ms {
             return Ok(creds);
         }
@@ -943,6 +967,11 @@ pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
 
     Ok(anthropic)
 }
+
+#[path = "claude_code_locks.rs"]
+pub mod claude_code_locks;
+#[path = "claude_refresh.rs"]
+pub(crate) mod claude_refresh;
 
 #[cfg(test)]
 #[path = "claude_tests.rs"]

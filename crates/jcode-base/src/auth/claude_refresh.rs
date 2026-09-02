@@ -1,12 +1,12 @@
 //! Claude OAuth refresh-token grant and the single-flight coordination
 //! around it (split out of `oauth.rs`).
 
-use super::oauth::{
+use crate::auth::claude as claude_auth;
+use crate::auth::oauth::{
     CLAUDE_TOKEN_TIMEOUT_SECS, OAuthTokens, claude, ensure_claude_inference_scope,
     parse_oauth_scopes, save_claude_tokens_for_account,
 };
-use crate::auth::claude as claude_auth;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -27,11 +27,33 @@ struct ClaudeRefreshTokenResponse {
     scope: Option<String>,
 }
 
-pub(super) fn claude_refresh_error_is_invalid_scope(err: &anyhow::Error) -> bool {
+pub(crate) fn claude_refresh_error_is_invalid_scope(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}").to_ascii_lowercase();
     text.contains("invalid_scope")
         || text.contains("requested scope is invalid")
         || text.contains("scope is invalid")
+}
+
+/// Lock retry jitter window, shrinkable in tests via `JCODE_CLAUDE_LOCK_RETRY_MS`.
+fn lock_retry_delay_ms() -> (u64, u64) {
+    if cfg!(test)
+        && let Ok(value) = std::env::var("JCODE_CLAUDE_LOCK_RETRY_MS")
+        && let Ok(ms) = value.parse::<u64>()
+    {
+        return (ms, ms);
+    }
+    crate::auth::claude::claude_code_locks::RETRY_DELAY_MS
+}
+
+/// Token endpoint, overridable in tests via `JCODE_CLAUDE_TOKEN_URL` so the
+/// grant can be exercised against a local mock server.
+fn claude_token_url() -> String {
+    if cfg!(test)
+        && let Ok(url) = std::env::var("JCODE_CLAUDE_TOKEN_URL")
+    {
+        return url;
+    }
+    claude::TOKEN_URL.to_string()
 }
 
 async fn send_claude_refresh_request(
@@ -47,7 +69,7 @@ async fn send_claude_refresh_request(
 
     let client = crate::provider::shared_http_client();
     let resp = client
-        .post(claude::TOKEN_URL)
+        .post(claude_token_url())
         .header("Content-Type", "application/json")
         .timeout(Duration::from_secs(CLAUDE_TOKEN_TIMEOUT_SECS))
         .json(&payload)
@@ -67,10 +89,8 @@ async fn send_claude_refresh_request(
     Ok(resp.json().await?)
 }
 
-async fn refresh_claude_tokens_inner(
-    refresh_token: &str,
-    label: Option<&str>,
-) -> Result<OAuthTokens> {
+/// The bare refresh-token grant. Persisting the result is the caller's job.
+async fn refresh_claude_tokens_inner(refresh_token: &str) -> Result<OAuthTokens> {
     let scoped_result =
         send_claude_refresh_request(refresh_token, Some(claude::REFRESH_SCOPES)).await;
     let tokens = match scoped_result {
@@ -104,11 +124,55 @@ async fn refresh_claude_tokens_inner(
         scopes,
     };
 
-    let save_label = label.map(ToString::to_string).unwrap_or_else(|| {
-        claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label)
-    });
-    save_claude_tokens_for_account(&oauth_tokens, &save_label)?;
+    Ok(oauth_tokens)
+}
 
+/// Run the grant and persist into jcode's own `auth.json` under `label`.
+async fn refresh_claude_tokens_into_auth_json(
+    refresh_token: &str,
+    label: &str,
+) -> Result<OAuthTokens> {
+    let oauth_tokens = refresh_claude_tokens_inner(refresh_token).await?;
+    save_claude_tokens_for_account(&oauth_tokens, label)?;
+    Ok(oauth_tokens)
+}
+
+/// Refresh a token that lives in Claude Code's credential file, joining Claude
+/// Code's own refresh protocol: hold both credential locks, re-read the file,
+/// abort when another process (Claude Code, cswap) already replaced the
+/// token, otherwise run the grant and write the result back atomically. The
+/// file is the only store touched; nothing is written to `auth.json`.
+pub(crate) async fn refresh_claude_tokens_in_credential_file(
+    refresh_token: &str,
+) -> Result<OAuthTokens> {
+    let config_home = claude_auth::claude_code_config_home()?;
+    let _locks = crate::auth::claude::claude_code_locks::acquire_credential_locks(
+        &config_home,
+        lock_retry_delay_ms(),
+    )
+    .await?;
+
+    // Double-checked re-read under the lock, as Claude Code does.
+    let current = claude_auth::load_trusted_claude_code_credentials()
+        .ok_or_else(|| anyhow::anyhow!("Claude Code credential file vanished during refresh"))?;
+    if current.refresh_token != refresh_token
+        && crate::auth::refresh_coordinator::expiry_is_fresh(current.expires_at)
+    {
+        crate::logging::info(
+            "Claude Code credential file was refreshed or switched by another process; using it as-is",
+        );
+        return Ok(OAuthTokens {
+            access_token: current.access_token,
+            refresh_token: current.refresh_token,
+            expires_at: current.expires_at,
+            id_token: None,
+            scopes: current.scopes,
+        });
+    }
+
+    let oauth_tokens = refresh_claude_tokens_inner(&current.refresh_token).await?;
+    write_claude_code_credentials(&config_home.join(".credentials.json"), &oauth_tokens)?;
+    crate::logging::info("Refreshed Claude Code credential file under its locks");
     Ok(oauth_tokens)
 }
 
@@ -121,8 +185,10 @@ pub async fn refresh_claude_tokens(refresh_token: &str) -> Result<OAuthTokens> {
 
 /// Stored Claude tokens for `label`, expressed as [`OAuthTokens`].
 fn stored_claude_tokens(label: &str) -> Option<OAuthTokens> {
-    let account = claude_auth::list_accounts()
-        .ok()?
+    let Ok(accounts) = claude_auth::list_accounts() else {
+        return None;
+    };
+    let account = accounts
         .into_iter()
         .find(|account| account.label == label)?;
     Some(OAuthTokens {
@@ -143,6 +209,21 @@ pub async fn refresh_claude_tokens_for_account(
     refresh_token: &str,
     label: &str,
 ) -> Result<OAuthTokens> {
+    // A token sourced from Claude Code's credential file is refreshed in
+    // place under Claude Code's locks; writing it into auth.json would leave
+    // the file one rotation stale and race Claude Code's own refresh.
+    if claude_auth::credential_file_owns_refresh_token(refresh_token) {
+        let result = crate::auth::refresh_coordinator::single_flight(
+            "claude:credential-file".to_string(),
+            || None::<OAuthTokens>,
+            |_| false,
+            |_| refresh_claude_tokens_in_credential_file(refresh_token),
+        )
+        .await;
+        crate::auth::refresh_state::record_refresh_outcome("claude", refresh_token, &result);
+        return result;
+    }
+
     let observed_refresh = refresh_token.to_string();
     let label = label.to_string();
     let result = crate::auth::refresh_coordinator::single_flight(
@@ -165,7 +246,7 @@ pub async fn refresh_claude_tokens_for_account(
                 .map(|tokens| tokens.refresh_token)
                 .filter(|token| !token.is_empty())
                 .unwrap_or(observed_refresh);
-            refresh_claude_tokens_inner(&token, Some(&label)).await
+            refresh_claude_tokens_into_auth_json(&token, &label).await
         },
     )
     .await;
@@ -175,4 +256,48 @@ pub async fn refresh_claude_tokens_for_account(
     crate::auth::refresh_state::record_refresh_outcome("claude", refresh_token, &result);
 
     result
+}
+
+/// Write refreshed tokens back into Claude Code's credential file, preserving
+/// every other key (`refreshTokenExpiresAt`, `rateLimitTier`, siblings of
+/// `claudeAiOauth`). Atomic: temp file in the same directory, 0600, fsync,
+/// rename. Callers must hold Claude Code's credential locks
+/// ([`super::claude_code_locks`]).
+fn write_claude_code_credentials(path: &std::path::Path, tokens: &OAuthTokens) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Could not read credentials from {:?}", path))?;
+    let mut doc: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Could not parse Claude credentials from {:?}", path))?;
+    let oauth = match doc.get_mut("claudeAiOauth") {
+        Some(wrapped) => wrapped,
+        None => &mut doc,
+    };
+    let Some(oauth) = oauth.as_object_mut() else {
+        anyhow::bail!("Claude credentials in {:?} are not a JSON object", path);
+    };
+    oauth.insert("accessToken".into(), tokens.access_token.clone().into());
+    oauth.insert("refreshToken".into(), tokens.refresh_token.clone().into());
+    oauth.insert("expiresAt".into(), tokens.expires_at.into());
+    if !tokens.scopes.is_empty() {
+        oauth.insert("scopes".into(), tokens.scopes.clone().into());
+    }
+
+    let dir = path
+        .parent()
+        .context("Claude Code credential path has no parent directory")?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".credentials.json.")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+        .with_context(|| format!("Could not create temp file in {:?}", dir))?;
+    jcode_core::fs::set_permissions_owner_only(temp.path())?;
+    {
+        use std::io::Write;
+        let file = temp.as_file_mut();
+        file.write_all(&serde_json::to_vec(&doc)?)?;
+        file.sync_all()?;
+    }
+    temp.persist(path)
+        .with_context(|| format!("Could not replace {:?}", path))?;
+    Ok(())
 }

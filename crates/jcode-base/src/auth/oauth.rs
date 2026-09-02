@@ -7,7 +7,9 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub use super::claude_refresh::{refresh_claude_tokens, refresh_claude_tokens_for_account};
+pub use crate::auth::claude::claude_refresh::{
+    refresh_claude_tokens, refresh_claude_tokens_for_account,
+};
 
 /// Claude Code OAuth configuration
 pub mod claude {
