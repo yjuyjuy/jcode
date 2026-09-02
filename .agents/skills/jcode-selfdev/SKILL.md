@@ -193,8 +193,12 @@ committing.
   either reads a 70-byte symlink, not a program. Resolve with `readlink -f` first.
 - **`~/.local/bin` must precede `~/.cargo/bin` on `PATH`**, otherwise a stale cargo-installed jcode
   shadows the launcher.
-- **`build-jcode` is a loose script in `~/.local/bin`, tracked in no repository.** Treat it as fleet
-  infrastructure; a fix to it does not travel with a jcode pull request.
+- **`build-jcode` is tracked in `yjuyjuy/skills` at `build-jcode/build-jcode`, and that copy is
+  authoritative.** The `~/.local/bin/build-jcode` on this box is an install of it, not the source. To
+  change its behavior, fix the tracked copy and reinstall; editing the installed copy in place leaves
+  a change that exists on one machine and travels with nothing. It is fleet infrastructure, so a fix
+  to it does not belong in a jcode pull request. The `build-jcode` skill in that same repository
+  carries the script-level detail.
 - **Deliver from a project clone or task worktree, on your own branch, with the pull request against
   `yjuyjuy/jcode`.** `origin` in the source checkout is upstream, which we do not own.
 - Read the repository's own `AGENTS.md` before changing subsystems: it carries the invariants that
