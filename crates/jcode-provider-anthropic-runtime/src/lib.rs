@@ -1871,6 +1871,33 @@ async fn run_stream_with_retries(
 
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                    // A usage-limit 429 means THIS account is capped, not that
+                    // the request itself is bad. When Claude Code's credential
+                    // file is the source, cswap owns the switch: nudge it once
+                    // and retry immediately on whatever it put in the file,
+                    // without inheriting the capped account's retry-after.
+                    // Only on an OAuth (account-scoped) request; an API-key
+                    // request has no account to switch.
+                    if is_oauth
+                        && is_rate_limit_error(&error_str)
+                        && let Some(new_token) =
+                            nudge_cswap_after_rate_limit(Arc::clone(&credentials)).await
+                    {
+                        if tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: "⤵ Rate limited; cswap switched accounts, retrying"
+                                    .to_string(),
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            // Receiver dropped: nobody left to tell, the retry still runs.
+                        }
+                        token = new_token;
+                        next_retry_delay = Some(std::time::Duration::from_millis(0));
+                        last_error = Some(e);
+                        continue;
+                    }
                     if saw_output {
                         // The fault hit mid-stream after partial output reached
                         // the consumer. Tell it to discard the partial attempt
@@ -2124,6 +2151,14 @@ async fn stream_response(
 }
 
 /// Check if an error is transient and should be retried
+/// A usage-limit 429, as opposed to any other retryable failure.
+fn is_rate_limit_error(error_str: &str) -> bool {
+    let lower = error_str.to_ascii_lowercase();
+    lower.contains("429 too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     jcode_provider_core::is_transient_transport_error(error_str)
         // Server errors (5xx)
@@ -2613,9 +2648,13 @@ use sse_types::{
 mod context_window;
 
 mod credential_refresh;
-use credential_refresh::force_refresh_oauth_token;
+use credential_refresh::{force_refresh_oauth_token, nudge_cswap_after_rate_limit};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 #[path = "anthropic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "credential_file_tests.rs"]
+mod credential_file_tests;

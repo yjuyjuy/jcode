@@ -285,6 +285,20 @@ fn claude_code_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
+/// Claude Code's credential file, when the user has trusted it as a source.
+/// `None` when untrusted, absent, or unparseable.
+pub fn load_trusted_claude_code_credentials() -> Option<ClaudeCredentials> {
+    let path = claude_code_path().ok()?;
+    // Hot path (per credential probe): use the process-cached config snapshot.
+    if !crate::config::Config::external_auth_source_allowed_for_path_cached(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &path,
+    ) {
+        return None;
+    }
+    load_claude_code_credentials().ok()
+}
+
 fn opencode_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".local/share/opencode/auth.json")
 }
