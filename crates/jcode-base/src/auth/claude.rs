@@ -285,6 +285,20 @@ fn claude_code_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
+/// Modification time of Claude Code's credential file, or `None` when the file
+/// is absent or unreadable. One `stat`, cheap enough for runtimes to call on
+/// every token fetch so an external switch of the file (cswap, `claude login`)
+/// is noticed on the next request instead of at token expiry.
+pub fn credential_file_mtime() -> Option<std::time::SystemTime> {
+    let Ok(path) = claude_code_path() else {
+        return None;
+    };
+    let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return None;
+    };
+    Some(modified)
+}
+
 fn opencode_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".local/share/opencode/auth.json")
 }

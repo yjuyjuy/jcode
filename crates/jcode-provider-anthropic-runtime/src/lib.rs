@@ -457,6 +457,12 @@ struct CachedCredentials {
     access_token: String,
     refresh_token: String,
     expires_at: i64,
+    /// Modification time of `~/.claude/.credentials.json` when this entry was
+    /// cached. `None` when the file did not exist (or the token came from a
+    /// jcode-owned store). A later mismatch means an external tool (cswap,
+    /// `claude login`) replaced the active account, so the entry is stale even
+    /// though its access token has not expired.
+    file_mtime: Option<std::time::SystemTime>,
 }
 
 /// Direct Anthropic API provider
@@ -955,13 +961,18 @@ impl AnthropicProvider {
     }
 
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
+        // One stat per fetch: an external switch of Claude Code's credential
+        // file must reach a running session on its next request, not at token
+        // expiry.
+        let file_mtime = auth::claude::credential_file_mtime();
+
         // Check cached credentials
         {
             let cached = self.credentials.read().await;
             if let Some(ref creds) = *cached {
                 let now = chrono::Utc::now().timestamp_millis();
                 // Return cached token if not expired (with 5 min buffer)
-                if creds.expires_at > now + 300_000 {
+                if creds.expires_at > now + 300_000 && creds.file_mtime == file_mtime {
                     return Ok((creds.access_token.clone(), true));
                 }
             }
@@ -1018,6 +1029,7 @@ impl AnthropicProvider {
                         access_token: refreshed.access_token.clone(),
                         refresh_token: refreshed.refresh_token,
                         expires_at: refreshed.expires_at,
+                        file_mtime,
                     });
 
                     return Ok((refreshed.access_token, true));
@@ -1047,6 +1059,7 @@ impl AnthropicProvider {
             access_token: fresh_creds.access_token.clone(),
             refresh_token: fresh_creds.refresh_token,
             expires_at: fresh_creds.expires_at,
+            file_mtime,
         });
 
         Ok((fresh_creds.access_token, true))
@@ -2619,3 +2632,7 @@ use credential_refresh::force_refresh_oauth_token;
 #[allow(clippy::await_holding_lock)]
 #[path = "anthropic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "credential_file_tests.rs"]
+mod credential_file_tests;

@@ -48,6 +48,7 @@ pub(crate) async fn force_refresh_oauth_token(
             access_token: refreshed.access_token.clone(),
             refresh_token: refreshed.refresh_token,
             expires_at: refreshed.expires_at,
+            file_mtime: auth::claude::credential_file_mtime(),
         });
     }
 
