@@ -285,6 +285,26 @@ fn claude_code_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
+/// Non-secret identity for log lines: the 12-char prefix plus the first 16 hex
+/// chars of the token's sha256. Every Claude OAuth token shares the same
+/// prefix, so the digest is what tells two accounts apart in a log.
+pub fn token_identity(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let trimmed = token.trim();
+    let prefix = if trimmed.is_empty() {
+        "(empty)".to_string()
+    } else {
+        let visible: String = trimmed.chars().take(12).collect();
+        if trimmed.chars().count() > 12 {
+            format!("{visible}...")
+        } else {
+            visible
+        }
+    };
+    let digest = hex::encode(Sha256::digest(trimmed.as_bytes()));
+    format!("{prefix} sha256:{}", &digest[..16])
+}
+
 fn opencode_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".local/share/opencode/auth.json")
 }

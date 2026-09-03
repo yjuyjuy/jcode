@@ -1010,7 +1010,10 @@ impl AnthropicProvider {
             .await
             {
                 Ok(refreshed) => {
-                    jcode_base::logging::info("OAuth token refreshed successfully");
+                    jcode_base::logging::info(&format!(
+                        "OAuth token refreshed successfully [{}]",
+                        auth::claude::token_identity(&refreshed.access_token)
+                    ));
 
                     // Cache the refreshed credentials
                     let mut cached = self.credentials.write().await;
@@ -1043,6 +1046,15 @@ impl AnthropicProvider {
 
         // Cache and return the still-usable loaded credentials.
         let mut cached = self.credentials.write().await;
+        if cached
+            .as_ref()
+            .is_none_or(|c| c.access_token != fresh_creds.access_token)
+        {
+            jcode_base::logging::info(&format!(
+                "Claude OAuth token loaded into cache [{}]",
+                auth::claude::token_identity(&fresh_creds.access_token)
+            ));
+        }
         *cached = Some(CachedCredentials {
             access_token: fresh_creds.access_token.clone(),
             refresh_token: fresh_creds.refresh_token,

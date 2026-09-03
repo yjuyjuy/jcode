@@ -601,3 +601,14 @@ impl Drop for EnvStringGuard {
         }
     }
 }
+
+#[test]
+fn token_identity_never_contains_the_token() {
+    let token = "sk-ant-oat01-abcdefghijklmnop";
+    let identity = token_identity(token);
+    assert!(identity.starts_with("sk-ant-oat01... sha256:"));
+    assert_eq!(identity.len(), "sk-ant-oat01... sha256:".len() + 16);
+    assert!(!identity.contains("abcdefghijklmnop"));
+    assert_ne!(identity, token_identity("sk-ant-oat01-abcdefghijklmnoq"));
+    assert!(token_identity("  ").starts_with("(empty) sha256:"));
+}
