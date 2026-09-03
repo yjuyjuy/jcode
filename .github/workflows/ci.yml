@@ -302,6 +302,23 @@ jobs:
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
 
+      - name: Run swarm communicate cohort (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        # The `jcode-app-core --lib` target is only compiled above, and the
+        # per-cohort runs are narrow filters, so nothing executed the swarm
+        # `communicate` tests. Four of them went red for weeks after the swarm
+        # identity change without CI noticing. This cohort is in-process (a
+        # socket server plus a stub provider, no API keys) and runs in seconds
+        # once the target is built.
+        #
+        # Linux only, matching the other end-to-end socket coverage: these
+        # tests bind a Unix domain socket under a temp runtime directory.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-app-core --lib communicate -- --nocapture
+
       - name: Run TUI library tests (Linux only)
         if: runner.os == 'Linux'
         shell: bash
