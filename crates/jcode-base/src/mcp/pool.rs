@@ -428,6 +428,9 @@ mod tests {
     use crate::mcp::protocol::McpConfig;
     use std::sync::Arc;
 
+    // The test-env lock is a std Mutex shared with sync tests; the awaits it
+    // spans here are config reads, not lock contention.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn issue_790_reload_reuses_default_config_directory() {
         let _guard = crate::storage::lock_test_env();
