@@ -7,6 +7,10 @@ async fn communicate_list_and_await_members_work_end_to_end() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Each root session owns its own swarm by default, so two independently
+    // subscribed clients would not see each other. This test needs them in one
+    // swarm; `JCODE_SWARM_ID` is the supported opt-in for exactly that.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "test-list-and-await-members");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -135,6 +139,9 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Root sessions are swarm-isolated by default; opt the watcher and the peer
+    // into one shared swarm so the await has a member to observe.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "test-await-members-background");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -293,6 +300,9 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Root sessions are swarm-isolated by default; opt the watcher and the peer
+    // into one shared swarm so the status snapshot has a member to report on.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "test-status-busy-snapshot");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -555,6 +565,9 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Root sessions are swarm-isolated by default; opt the sender and the peer
+    // into one shared swarm so both routing paths have a recipient.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "test-message-routing");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),
