@@ -22,6 +22,9 @@ use jcode_provider_core::{
     ANTHROPIC_OAUTH_BETA_HEADERS, anthropic_effectively_1m,
     anthropic_stainless_arch as stainless_arch, anthropic_stainless_os as stainless_os,
 };
+pub use jcode_provider_core::{
+    CLAUDE_CODE_VERSION, claude_cli_user_agent, claude_code_version, claude_oauth_billing_header,
+};
 
 static CACHE_TTL_1H: AtomicBool = AtomicBool::new(true);
 
@@ -36,8 +39,7 @@ pub fn is_cache_ttl_1h() -> bool {
 }
 
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
-pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.280 (external, sdk-cli)";
-
+/// See [`claude_cli_user_agent`] for the live value (env-overridable).
 pub const OAUTH_BETA_HEADERS: &str = ANTHROPIC_OAUTH_BETA_HEADERS;
 
 /// Whether a model id effectively runs with the 1M-token context beta.

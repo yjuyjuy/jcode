@@ -2,12 +2,12 @@ use jcode_message_types::{
     ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition, sanitize_tool_id,
 };
 use jcode_provider_core::anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth;
+use jcode_provider_core::claude_oauth_billing_header;
 use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Claude Code billing attribution text observed in the official CLI's system
-/// prompt blocks.
-pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
+/// prompt blocks. See [`claude_oauth_billing_header`] for the live value.
 
 const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
@@ -675,7 +675,10 @@ pub fn build_system_param_split(
         let mut blocks = Vec::new();
         blocks.push(ApiSystemBlock {
             block_type: "text",
-            text: format!("x-anthropic-billing-header: {}", OAUTH_BILLING_HEADER),
+            text: format!(
+                "x-anthropic-billing-header: {}",
+                claude_oauth_billing_header()
+            ),
             cache_control: None,
         });
         blocks.push(ApiSystemBlock {

@@ -1,3 +1,40 @@
+/// The Claude Code CLI version we impersonate over the OAuth path.
+///
+/// Anthropic gates model access on this version: requests presenting a version
+/// below the model's floor are rejected with `claude_code_version_too_old`
+/// (HTTP 400). Keep this at or above the newest model's required floor; it is
+/// the single source of truth for every place that reports a Claude Code
+/// version (user agent, OAuth preflight `app_version`, billing header
+/// `cc_version`). Verify against the latest `@anthropic-ai/claude-code` npm
+/// release before bumping.
+pub const CLAUDE_CODE_VERSION: &str = "2.1.280";
+
+/// The impersonated Claude Code CLI version, honoring the
+/// `JCODE_CLAUDE_CLI_VERSION` env override for emergencies without a rebuild.
+/// Falls back to [`CLAUDE_CODE_VERSION`].
+pub fn claude_code_version() -> String {
+    match std::env::var("JCODE_CLAUDE_CLI_VERSION") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => CLAUDE_CODE_VERSION.to_string(),
+    }
+}
+
+/// The `User-Agent` header value for OAuth requests, matching the official
+/// Claude Code CLI (e.g. `claude-cli/2.1.280 (external, sdk-cli)`).
+pub fn claude_cli_user_agent() -> String {
+    format!("claude-cli/{} (external, sdk-cli)", claude_code_version())
+}
+
+/// The Claude Code billing-attribution header value observed in the official
+/// CLI's system prompt blocks (e.g.
+/// `cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;`).
+pub fn claude_oauth_billing_header() -> String {
+    format!(
+        "cc_version={}; cc_entrypoint=sdk-cli; cch=33f85;",
+        claude_code_version()
+    )
+}
+
 /// Claude Code OAuth beta headers used by the Anthropic transport.
 pub const ANTHROPIC_OAUTH_BETA_HEADERS: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24";
 

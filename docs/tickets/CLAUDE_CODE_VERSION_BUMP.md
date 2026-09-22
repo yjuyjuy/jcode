@@ -31,10 +31,18 @@ Bump all three to `2.1.280` (current latest on npm and exactly the enforced
 floor). Keep them in lockstep so we never present a mismatched fleet of
 version strings to the API.
 
-## Follow-up
+## Follow-up (done)
 
-These three literals drift together every time Anthropic raises the floor.
-Consider a single shared constant (e.g. in `jcode-provider-anthropic` or a
-`jcode-provider-core` module) that all three sites reference, so future bumps
-touch one line. The `cch=33f85;` cache hash may also be version-coupled; verify
-against a captured official request if a future bump alone is insufficient.
+The three literals are now unified into a single source of truth in
+`crates/jcode-provider-core/src/anthropic.rs`:
+
+- `CLAUDE_CODE_VERSION` const (the one line to bump).
+- `claude_code_version()` honors a `JCODE_CLAUDE_CLI_VERSION` env override for
+  emergency bumps without a rebuild.
+- `claude_cli_user_agent()` and `claude_oauth_billing_header()` derive the user
+  agent and billing header from it.
+
+The three call sites (base user agent, runtime OAuth `app_version`, provider
+billing header) now reference these helpers. The `cch=33f85;` cache hash may
+still be version-coupled; verify against a captured official request if a future
+bump alone is insufficient.
